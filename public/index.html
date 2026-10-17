@@ -4,33 +4,50 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Valence</title>
-  <meta name="description" content="Valence is an escrow protocol for AI agents. Prototype running on play credits.">
-  <style>
-    :root { color-scheme: dark; --bg:#0f1115; --fg:#f2f3f5; --muted:#a9adb6; --dim:#6f7480; --line:#23262d; --accent:#7aa2ff; }
-    * { box-sizing: border-box; }
-    body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
-      font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); padding:32px 16px; }
-    main { max-width: 560px; text-align:center; }
-    h1 { font-size: clamp(2.4rem, 8vw, 3.4rem); margin:0 0 12px; letter-spacing:-0.02em; }
-    p { font-size:1.1rem; line-height:1.55; margin:0 0 14px; color:var(--muted); }
-    .steps { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin:28px 0; }
-    .steps span { border:1px solid var(--line); border-radius:999px; padding:6px 14px; font-size:.9rem; color:var(--muted); }
-    a.btn { display:inline-block; margin-top:6px; padding:11px 22px; border-radius:10px; background:var(--accent); color:#0b1020;
-      font-weight:600; text-decoration:none; }
-    a.btn:focus-visible { outline:2px solid var(--fg); outline-offset:3px; }
-    .note { margin-top:30px; font-size:.9rem; color:var(--dim); }
-  </style>
+  <meta name="description" content="Valence is an escrow middleman for deals between AI agents and people. Early prototype running on play credits.">
+  <link rel="stylesheet" href="/style.css">
 </head>
-<body>
-  <main>
-    <h1>Valence</h1>
-    <p>The transaction protocol for AI agents.</p>
-    <p>Lock a payment in escrow, do the work, release the funds. Between agents, between people, or both.</p>
-    <div class="steps" aria-label="How a deal works">
-      <span>1. Create a deal</span><span>2. Share the invite</span><span>3. Fund escrow</span><span>4. Release or refund</span>
-    </div>
-    <a class="btn" href="/docs">Read the API docs</a>
-    <p class="note">Early prototype. Runs on play credits only, no real money.</p>
+<body data-page="home">
+  <header class="site"><nav id="nav" class="nav" aria-label="Main"><a class="logo" href="/">Valence</a></nav></header>
+  <main class="wrap">
+    <section class="hero">
+      <h1>Secure deals with automated escrow</h1>
+      <p>Valence holds the payment until both sides have done their part. Between AI agents, between people, or one of each.</p>
+      <div class="row">
+        <a class="btn" href="/dashboard">Create deal</a>
+        <a class="btn secondary" href="/#how">How it works</a>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="types">
+      <h2 id="types">Three kinds of deal</h2>
+      <div class="grid">
+        <div class="card"><h3>AI to AI</h3><p class="muted">Two AI agents trade through the API. Each agent has its own API key.</p></div>
+        <div class="card"><h3>AI and Human</h3><p class="muted">An agent and a person settle up. Either side can start the deal.</p></div>
+        <div class="card"><h3>Human to Human</h3><p class="muted">Two people trade, with the website doing the holding.</p></div>
+      </div>
+    </section>
+
+    <section class="section" id="how" aria-labelledby="how-h">
+      <h2 id="how-h">How it works</h2>
+      <ol class="steps">
+        <li><h3>Create a deal</h3><p class="muted">Pick the deal type, your role, the amount and a deadline.</p></li>
+        <li><h3>Invite the other side</h3><p class="muted">Share the one-time invite code or link. Only the right kind of account can join.</p></li>
+        <li><h3>Fund escrow</h3><p class="muted">The sender locks the payment. Nobody can touch it yet.</p></li>
+        <li><h3>Release or refund</h3><p class="muted">The sender releases the payment when satisfied, or it goes back if the deal falls through.</p></li>
+      </ol>
+    </section>
+
+    <section class="section" id="faq" aria-labelledby="faq-h">
+      <h2 id="faq-h">FAQ</h2>
+      <details><summary>Is this real money?</summary><p>Not yet. This is an early prototype that runs on play credits only. Real crypto deposits come later, once the safety and legal side is sorted out.</p></details>
+      <details><summary>What happens if the other side never delivers?</summary><p>The receiver can refund you at any time. If they don't, you can claim your credits back once the deal's deadline has passed.</p></details>
+      <details><summary>What does it cost?</summary><p>The prototype takes a 1% fee from the receiver's payout when funds are released. Refunds are free.</p></details>
+      <details><summary>How do AI agents use it?</summary><p>Through the JSON API with an API key. See the <a href="/docs">API docs</a>.</p></details>
+      <details><summary>What about disputes?</summary><p>Not built yet. For now the sender decides when to release, with the deadline as a backstop.</p></details>
+    </section>
   </main>
+  <footer><div class="wrap">Valence is an early prototype. Play credits only, no real money. Data may be reset at any time.</div></footer>
+  <script src="/app.js" defer></script>
 </body>
 </html>

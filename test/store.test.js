@@ -201,3 +201,171 @@ test("credits are conserved across many random deals", () => {
     for (const a of agents) assert.ok(a.rec.balance >= 0, "balance went negative");
   }
 });
+
+// ---------- people, sessions, deal types, test credits ----------
+
+const { parseTestCodes } = require("../src/store");
+
+async function person(store, name = "alice", password = "correct horse") {
+  const r = await store.registerHuman(name, password);
+  return { token: r.token, rec: store.authenticate(r.token), password };
+}
+
+const rejects = async (fn) => {
+  try { await fn(); } catch (e) { return `${e.status}:${e.code}`; }
+  return "no error";
+};
+
+test("people can sign up, log in, and log out; passwords are never kept in plain text", async () => {
+  const { store } = setup();
+  const alice = await person(store, "Alice_1");
+  assert.equal(alice.rec.kind, "human");
+  assert.equal(alice.rec.name, "alice_1"); // usernames are lowercased
+  assert.equal(alice.rec.balance, 100);
+  assert.equal(JSON.stringify(alice.rec).includes(alice.password), false);
+
+  const login = await store.loginHuman("ALICE_1", alice.password);
+  assert.equal(store.authenticate(login.token).id, alice.rec.id);
+  assert.equal(await rejects(() => store.loginHuman("alice_1", "wrong password")), "401:invalid_login");
+  assert.equal(await rejects(() => store.loginHuman("nobody", "whatever1")), "401:invalid_login");
+  assert.equal(await rejects(() => store.loginHuman("alice_1", { x: 1 })), "401:invalid_login");
+
+  store.logout(login.token);
+  assert.equal(store.authenticate(login.token), null);
+  assert.ok(store.authenticate(alice.token), "other sessions stay valid");
+});
+
+test("signup validation and unique usernames", async () => {
+  const { store } = setup();
+  await person(store, "taken_name");
+  assert.equal(await rejects(() => store.registerHuman("TAKEN_name", "longenough1")), "409:username_taken");
+  assert.equal(await rejects(() => store.registerHuman("ab", "longenough1")), "400:invalid_username");
+  assert.equal(await rejects(() => store.registerHuman("has space", "longenough1")), "400:invalid_username");
+  assert.equal(await rejects(() => store.registerHuman("<script>", "longenough1")), "400:invalid_username");
+  assert.equal(await rejects(() => store.registerHuman("x".repeat(21), "longenough1")), "400:invalid_username");
+  assert.equal(await rejects(() => store.registerHuman(42, "longenough1")), "400:invalid_username");
+  assert.equal(await rejects(() => store.registerHuman("valid_one", "short")), "400:invalid_password");
+  assert.equal(await rejects(() => store.registerHuman("valid_one", "p".repeat(129))), "400:invalid_password");
+  assert.equal(await rejects(() => store.registerHuman("valid_one", undefined)), "400:invalid_password");
+});
+
+test("two signups for the same username at the same time: only one wins", async () => {
+  const { store } = setup();
+  const results = await Promise.allSettled([store.registerHuman("racer", "password-1"), store.registerHuman("racer", "password-2")]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal(results.filter((r) => r.status === "rejected")[0].reason.code, "username_taken");
+  assert.equal(store.audit().accounts, 1);
+});
+
+test("sessions expire after 7 days", async () => {
+  const { store, clock } = setup();
+  const p = await person(store);
+  clock.t += 6 * 24 * 3600 * 1000;
+  assert.ok(store.authenticate(p.token));
+  clock.t += 2 * 24 * 3600 * 1000;
+  assert.equal(store.authenticate(p.token), null);
+});
+
+test("authenticate only accepts the right kind of token", async () => {
+  const { store, agent } = setup();
+  const a = agent("bot");
+  const p = await person(store);
+  assert.equal(store.authenticate(a.apiKey).kind, "agent");
+  assert.equal(store.authenticate(p.token).kind, "human");
+  for (const bad of ["", "vlc_", "vls_", "Bearer " + a.apiKey, p.token + "x", null, undefined, 5, "x".repeat(200)]) {
+    assert.equal(store.authenticate(bad), null, String(bad));
+  }
+});
+
+test("deal types: who can create and who can join", async () => {
+  const { store, agent } = setup();
+  const bot1 = agent("bot1");
+  const bot2 = agent("bot2");
+  const ann = await person(store, "ann");
+  const bob = await person(store, "bob");
+  const create = (acct, type) => store.createDeal(acct.rec, { title: "t", amount: 5, type });
+
+  // creation rules
+  assert.equal(code(() => create(ann, "ai-ai")), "403:wrong_account_type");
+  assert.equal(code(() => create(bot1, "human-human")), "403:wrong_account_type");
+  assert.equal(code(() => create(bot1, "nonsense")), "400:invalid_type");
+  assert.equal(store.createDeal(bot1.rec, { title: "t", amount: 5 }).type, "ai-ai"); // default for agents
+  assert.equal(store.createDeal(ann.rec, { title: "t", amount: 5 }).type, "human-human"); // default for people
+
+  // AI to AI: only an agent may join
+  const aa = create(bot1, "ai-ai");
+  assert.equal(aa.joinKind, "agent");
+  assert.equal(code(() => store.joinDeal(ann.rec, aa.inviteCode)), "403:wrong_account_type");
+  assert.equal(store.joinDeal(bot2.rec, aa.inviteCode).state, "joined");
+
+  // Human to Human: only a person may join
+  const hh = create(ann, "human-human");
+  assert.equal(hh.joinKind, "human");
+  assert.equal(code(() => store.joinDeal(bot1.rec, hh.inviteCode)), "403:wrong_account_type");
+  assert.equal(store.joinDeal(bob.rec, hh.inviteCode).state, "joined");
+
+  // AI and Human, created by the AI: a person must join
+  const ah = create(bot1, "ai-human");
+  assert.equal(ah.joinKind, "human");
+  assert.equal(code(() => store.joinDeal(bot2.rec, ah.inviteCode)), "403:wrong_account_type");
+  const joined = store.joinDeal(bob.rec, ah.inviteCode);
+  assert.equal(joined.buyer.kind === "agent" || joined.seller.kind === "agent", true);
+  assert.equal(joined.buyer.kind !== joined.seller.kind, true);
+
+  // AI and Human, created by the person: an AI agent must join
+  const ha = create(ann, "ai-human");
+  assert.equal(ha.joinKind, "agent");
+  assert.equal(code(() => store.joinDeal(bob.rec, ha.inviteCode)), "403:wrong_account_type");
+  assert.equal(store.joinDeal(bot2.rec, ha.inviteCode).state, "joined");
+});
+
+test("a person and an AI agent can complete a full deal either way round", async () => {
+  const { store, agent } = setup();
+  const bot = agent("bot");
+  const ann = await person(store, "ann");
+
+  // person pays the AI
+  let d = store.createDeal(ann.rec, { title: "write code", amount: 60, type: "ai-human", role: "buyer" });
+  store.joinDeal(bot.rec, d.inviteCode);
+  store.fundDeal(ann.rec, d.id);
+  store.releaseDeal(ann.rec, d.id);
+  assert.equal(ann.rec.balance, 40);
+  assert.equal(bot.rec.balance, 160); // fee floor(60 * 1%) = 0
+
+  // AI pays the person
+  d = store.createDeal(bot.rec, { title: "photo", amount: 100, type: "ai-human", role: "buyer" });
+  store.joinDeal(ann.rec, d.inviteCode);
+  store.fundDeal(bot.rec, d.id);
+  store.releaseDeal(bot.rec, d.id);
+  assert.equal(bot.rec.balance, 60);
+  assert.equal(ann.rec.balance, 139); // 40 + 100 - fee 1
+  assert.equal(store.audit().ok, true);
+});
+
+test("test credits: disabled by default, secret code adds credits and keeps the ledger balanced", async () => {
+  const off = setup();
+  const offAgent = off.agent("a");
+  assert.equal(code(() => off.store.redeemCredits(offAgent.rec, "anything")), "404:redeem_disabled");
+
+  const clock = { t: Date.now() };
+  const store = createStore({ now: () => clock.t, testCodes: parseTestCodes("my-secret-code=500, another-code-1=25") });
+  const r = store.registerAgent("a");
+  const a = store.authenticate(r.apiKey);
+  assert.equal(code(() => store.redeemCredits(a, "wrong")), "400:invalid_code");
+  assert.equal(code(() => store.redeemCredits(a, "")), "400:invalid_code");
+  assert.equal(code(() => store.redeemCredits(a, undefined)), "400:invalid_code");
+  assert.deepEqual(store.redeemCredits(a, "my-secret-code"), { added: 500, balance: 600 });
+  assert.deepEqual(store.redeemCredits(a, "  another-code-1  "), { added: 25, balance: 625 });
+  assert.equal(store.audit().ok, true);
+  assert.equal(store.me(a).recentLedger[0].memo, "test credits (code redeemed)");
+  assert.equal(JSON.stringify(store.me(a)).includes("my-secret-code"), false);
+});
+
+test("parseTestCodes ignores short codes, bad amounts and junk", () => {
+  assert.deepEqual([...parseTestCodes("abcdefgh=10,short=5,validcode1=0,validcode2=-3,validcode3=1.5,novalue,=7, goodcode99 = 42 ")], [
+    ["abcdefgh", 10],
+    ["goodcode99", 42],
+  ]);
+  assert.equal(parseTestCodes(undefined).size, 0);
+  assert.equal(parseTestCodes("").size, 0);
+});

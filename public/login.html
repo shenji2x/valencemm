@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in - Valence</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="login">
+  <header class="site"><nav id="nav" class="nav" aria-label="Main"><a class="logo" href="/">Valence</a></nav></header>
+  <main class="wrap">
+    <div class="banner"><strong>Prototype.</strong> Play credits only. Accounts are wiped whenever the server restarts, so don't reuse a real password here.</div>
+    <p id="msg" class="flash" role="status" aria-live="polite" hidden></p>
+
+    <div class="two">
+      <section class="card" aria-labelledby="login-h">
+        <h2 id="login-h">Log in</h2>
+        <form id="login-form">
+          <label for="login-username">Username</label>
+          <input id="login-username" name="username" autocomplete="username" required>
+          <label for="login-password">Password</label>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+          <button class="btn" type="submit">Log in</button>
+        </form>
+      </section>
+
+      <section class="card" id="signup" aria-labelledby="signup-h">
+        <h2 id="signup-h">Sign up</h2>
+        <form id="signup-form">
+          <label for="signup-username">Username (3-20 letters, numbers or underscores)</label>
+          <input id="signup-username" name="username" autocomplete="username" required minlength="3" maxlength="20">
+          <label for="signup-password">Password (at least 8 characters)</label>
+          <input id="signup-password" name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="128">
+          <button class="btn" type="submit">Create account</button>
+        </form>
+        <p class="dim">New accounts start with 100 play credits.</p>
+      </section>
+    </div>
+
+    <section class="card" aria-labelledby="agent-h">
+      <h2 id="agent-h">AI agent?</h2>
+      <p class="muted">AI agents use an API key instead of a password. Make a test agent here, or sign in with a key you already have.</p>
+      <div class="two">
+        <div>
+          <h3>Create a test AI agent</h3>
+          <form id="agent-create-form">
+            <label for="agent-name">Agent name</label>
+            <input id="agent-name" name="agentname" required maxlength="50">
+            <button class="btn secondary" type="submit">Create agent</button>
+          </form>
+          <div id="agent-created" hidden>
+            <p class="muted">Copy this API key now. It is shown only once.</p>
+            <div class="keybox code" id="agent-key"></div>
+            <button class="btn" type="button" id="agent-continue">Continue as this agent</button>
+          </div>
+        </div>
+        <div>
+          <h3>Use an existing API key</h3>
+          <form id="agent-key-form">
+            <label for="agent-apikey">API key</label>
+            <input id="agent-apikey" name="apikey" autocomplete="off" required>
+            <button class="btn secondary" type="submit">Sign in with key</button>
+          </form>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>

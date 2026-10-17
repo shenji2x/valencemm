@@ -3,20 +3,28 @@
 // A real database comes later; the method names here are the seam to swap it in.
 
 const crypto = require("crypto");
+const { promisify } = require("util");
 const { ApiError } = require("./errors");
 
-const STARTING_CREDITS = 100;
-const FEE_BPS = 100; // 1% platform fee, charged to the seller's payout on release
+const scrypt = promisify(crypto.scrypt);
+
+const STARTING_CREDITS = 100; // welcome grant of play credits; set to 0 to require a test code instead
+const FEE_BPS = 100; // 1% platform fee, charged to the receiver's payout on release
 const MAX_AMOUNT = 10000;
-const MAX_AGENTS = 5000;
+const MAX_ACCOUNTS = 5000;
 const MAX_DEALS = 20000;
-const MAX_OPEN_DEALS_PER_AGENT = 20;
+const MAX_OPEN_DEALS_PER_ACCOUNT = 20;
 const MAX_LEDGER_ENTRIES = 200000;
-const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
+const MAX_SESSIONS = 20000;
+const MAX_REDEEMED_PER_ACCOUNT = 100000;
+const SESSION_MS = 7 * 24 * 3600 * 1000;
 const HOUR_MS = 3600 * 1000;
+const DEAL_TYPES = ["ai-ai", "ai-human", "human-human"];
+const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
 const OPEN_STATES = new Set(["open", "joined", "funded"]);
 
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+const sha256Buf = (s) => crypto.createHash("sha256").update(s).digest();
 const randomId = (prefix) => `${prefix}_${crypto.randomBytes(9).toString("hex")}`;
 
 function newInviteCode() {
@@ -34,23 +42,60 @@ function cleanText(value, field, { min = 1, max }) {
   return v;
 }
 
-function createStore({ now = () => Date.now() } = {}) {
-  const agents = new Map(); // agentId -> agent
-  const agentsByKeyHash = new Map(); // sha256(apiKey) -> agent
+// TEST_CREDIT_CODES="secretcode1=500,anothercode=100" -> Map(code -> credits).
+// Codes must be at least 8 characters. Unset or empty disables test credits entirely.
+function parseTestCodes(text) {
+  const codes = new Map();
+  for (const part of String(text || "").split(",")) {
+    const i = part.lastIndexOf("=");
+    if (i < 1) continue;
+    const code = part.slice(0, i).trim();
+    const amount = Number(part.slice(i + 1).trim());
+    if (code.length >= 8 && Number.isInteger(amount) && amount >= 1 && amount <= MAX_REDEEMED_PER_ACCOUNT) codes.set(code, amount);
+  }
+  return codes;
+}
+
+function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
+  const accounts = new Map(); // accountId -> account
+  const byKeyHash = new Map(); // sha256(apiKey) -> account (AI agents)
+  const byUsername = new Map(); // lowercase username -> account (people)
+  const sessions = new Map(); // sha256(sessionToken) -> { accountId, expiresAt }
   const deals = new Map(); // dealId -> deal
   const dealsByInvite = new Map(); // inviteCode -> dealId
   const ledger = []; // append-only
   const platform = { balance: 0 };
+  let minted = 0; // every credit ever created (welcome grants + test codes)
+  const dummySalt = crypto.randomBytes(16); // used to keep login timing similar for unknown usernames
 
   function record(account, delta, dealId, memo) {
     ledger.push({ id: ledger.length + 1, at: now(), account, delta, dealId: dealId || null, memo });
     if (ledger.length > MAX_LEDGER_ENTRIES) ledger.splice(0, ledger.length - MAX_LEDGER_ENTRIES);
   }
 
-  function openDealCount(agentId) {
+  function mint(account, amount, memo) {
+    account.balance += amount;
+    minted += amount;
+    record(account.id, amount, null, memo);
+  }
+
+  function newSession(account) {
+    if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
+    const token = "vls_" + crypto.randomBytes(24).toString("hex");
+    sessions.set(sha256(token), { accountId: account.id, expiresAt: now() + SESSION_MS });
+    return token;
+  }
+
+  function publicAccount(a) {
+    const out = { accountId: a.id, kind: a.kind, name: a.name, balance: a.balance, currency: "play-credits" };
+    if (a.username) out.username = a.username;
+    return out;
+  }
+
+  function openDealCount(accountId) {
     let n = 0;
     for (const d of deals.values()) {
-      if ((d.buyerId === agentId || d.sellerId === agentId) && OPEN_STATES.has(d.state)) n++;
+      if ((d.buyerId === accountId || d.sellerId === accountId) && OPEN_STATES.has(d.state)) n++;
     }
     return n;
   }
@@ -60,66 +105,146 @@ function createStore({ now = () => Date.now() } = {}) {
     deal.history.push({ at: now(), state, by: byId });
   }
 
+  function party(id) {
+    const a = id && accounts.get(id);
+    return a ? { id: a.id, name: a.name, kind: a.kind } : null;
+  }
+
   function view(deal, viewerId) {
     const role = deal.buyerId === viewerId ? "buyer" : deal.sellerId === viewerId ? "seller" : null;
     const out = {
       id: deal.id,
+      type: deal.type,
       title: deal.title,
       description: deal.description,
       amount: deal.amount,
       feeBps: FEE_BPS,
+      deadlineHours: deal.deadlineHours,
       state: deal.state,
       yourRole: role,
       buyerId: deal.buyerId,
       sellerId: deal.sellerId,
+      buyer: party(deal.buyerId),
+      seller: party(deal.sellerId),
       createdAt: new Date(deal.createdAt).toISOString(),
       fundedAt: deal.fundedAt ? new Date(deal.fundedAt).toISOString() : null,
       deadlineAt: deal.deadlineAt ? new Date(deal.deadlineAt).toISOString() : null,
       history: deal.history.map((h) => ({ at: new Date(h.at).toISOString(), state: h.state, by: h.by })),
     };
+    if (deal.state === "open") out.joinKind = deal.joinKind; // who may join: "agent" or "human"
     // Only the creator sees the invite code, and only until someone joins.
     if (deal.state === "open" && deal.creatorId === viewerId) out.inviteCode = deal.inviteCode;
     return out;
   }
 
-  function mustGetDeal(agent, dealId) {
+  function mustGetDeal(account, dealId) {
     const deal = deals.get(dealId);
     // Same error whether the deal is missing or belongs to others, so ids can't be probed.
-    if (!deal || (deal.buyerId !== agent.id && deal.sellerId !== agent.id)) {
+    if (!deal || (deal.buyerId !== account.id && deal.sellerId !== account.id)) {
       throw new ApiError(404, "deal_not_found", "Deal not found");
     }
     return deal;
   }
 
+  function checkCapacity() {
+    if (accounts.size >= MAX_ACCOUNTS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
+  }
+
   return {
     registerAgent(rawName) {
       const name = cleanText(rawName, "name", { max: 50 });
-      if (agents.size >= MAX_AGENTS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
+      checkCapacity();
       const apiKey = "vlc_" + crypto.randomBytes(24).toString("hex");
-      const agent = { id: randomId("agent"), name, createdAt: now(), balance: STARTING_CREDITS, keyHash: sha256(apiKey) };
-      agents.set(agent.id, agent);
-      agentsByKeyHash.set(agent.keyHash, agent);
-      record(agent.id, STARTING_CREDITS, null, "play-credit signup grant");
-      return { agentId: agent.id, name: agent.name, apiKey, balance: agent.balance };
+      const agent = { id: randomId("agent"), kind: "agent", name, createdAt: now(), balance: 0, redeemed: 0, keyHash: sha256(apiKey) };
+      accounts.set(agent.id, agent);
+      byKeyHash.set(agent.keyHash, agent);
+      mint(agent, STARTING_CREDITS, "play-credit welcome grant");
+      return { agentId: agent.id, accountId: agent.id, kind: "agent", name: agent.name, apiKey, balance: agent.balance };
     },
 
-    authenticate(apiKey) {
-      if (typeof apiKey !== "string" || apiKey.length > 100) return null;
-      return agentsByKeyHash.get(sha256(apiKey)) || null;
+    async registerHuman(rawUsername, password) {
+      const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : "";
+      if (!/^[a-z0-9_]{3,20}$/.test(username)) {
+        throw new ApiError(400, "invalid_username", "Username must be 3-20 letters, numbers or underscores");
+      }
+      if (typeof password !== "string" || password.length < 8 || password.length > 128) {
+        throw new ApiError(400, "invalid_password", "Password must be 8-128 characters");
+      }
+      checkCapacity();
+      if (byUsername.has(username)) throw new ApiError(409, "username_taken", "That username is taken");
+      const salt = crypto.randomBytes(16);
+      const hash = await scrypt(password, salt, 64);
+      // re-check after the await: another signup may have claimed the name meanwhile
+      if (byUsername.has(username)) throw new ApiError(409, "username_taken", "That username is taken");
+      checkCapacity();
+      const person = { id: randomId("user"), kind: "human", name: username, username, createdAt: now(), balance: 0, redeemed: 0, salt, hash };
+      accounts.set(person.id, person);
+      byUsername.set(username, person);
+      mint(person, STARTING_CREDITS, "play-credit welcome grant");
+      return { token: newSession(person), account: publicAccount(person) };
     },
 
-    me(agent) {
-      const recent = ledger.filter((e) => e.account === agent.id).slice(-20).reverse();
+    async loginHuman(rawUsername, password) {
+      const fail = () => new ApiError(401, "invalid_login", "Wrong username or password");
+      const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : "";
+      if (typeof password !== "string" || password.length > 128) throw fail();
+      const person = byUsername.get(username);
+      if (!person) {
+        await scrypt(password, dummySalt, 64); // spend similar time so usernames can't be probed by timing
+        throw fail();
+      }
+      const hash = await scrypt(password, person.salt, 64);
+      if (!crypto.timingSafeEqual(hash, person.hash)) throw fail();
+      return { token: newSession(person), account: publicAccount(person) };
+    },
+
+    // Accepts an AI agent API key (vlc_...) or a person's session token (vls_...).
+    authenticate(token) {
+      if (typeof token !== "string" || token.length > 100) return null;
+      if (token.startsWith("vlc_")) return byKeyHash.get(sha256(token)) || null;
+      if (token.startsWith("vls_")) {
+        const h = sha256(token);
+        const s = sessions.get(h);
+        if (!s) return null;
+        if (s.expiresAt <= now()) {
+          sessions.delete(h);
+          return null;
+        }
+        return accounts.get(s.accountId) || null;
+      }
+      return null;
+    },
+
+    logout(token) {
+      if (typeof token === "string" && token.startsWith("vls_")) sessions.delete(sha256(token));
+    },
+
+    me(account) {
+      const recent = ledger.filter((e) => e.account === account.id).slice(-20).reverse();
       return {
-        agentId: agent.id,
-        name: agent.name,
-        balance: agent.balance,
-        currency: "play-credits",
+        ...publicAccount(account),
         recentLedger: recent.map((e) => ({ at: new Date(e.at).toISOString(), delta: e.delta, dealId: e.dealId, memo: e.memo })),
       };
     },
 
-    createDeal(agent, input) {
+    // Test-only stand-in for depositing money: a secret code from the server's environment adds credits.
+    redeemCredits(account, rawCode) {
+      if (testCodes.size === 0) throw new ApiError(404, "redeem_disabled", "Test credits are not turned on for this server");
+      const given = sha256Buf(typeof rawCode === "string" ? rawCode.trim() : "");
+      let amount = null;
+      for (const [code, credits] of testCodes) {
+        if (crypto.timingSafeEqual(given, sha256Buf(code)) && amount === null) amount = credits;
+      }
+      if (amount === null) throw new ApiError(400, "invalid_code", "That code isn't valid");
+      if (account.redeemed + amount > MAX_REDEEMED_PER_ACCOUNT) {
+        throw new ApiError(409, "redeem_limit", "This account has reached the test credit limit");
+      }
+      account.redeemed += amount;
+      mint(account, amount, "test credits (code redeemed)");
+      return { added: amount, balance: account.balance };
+    },
+
+    createDeal(account, input) {
       const title = cleanText(input.title, "title", { max: 100 });
       const description = input.description == null ? "" : cleanText(input.description, "description", { min: 0, max: 500 });
       const amount = input.amount;
@@ -132,71 +257,83 @@ function createStore({ now = () => Date.now() } = {}) {
       if (!Number.isInteger(deadlineHours) || deadlineHours < 1 || deadlineHours > 720) {
         throw new ApiError(400, "invalid_deadline", "deadlineHours must be a whole number from 1 to 720");
       }
+      const type = input.type == null ? (account.kind === "agent" ? "ai-ai" : "human-human") : input.type;
+      if (!DEAL_TYPES.includes(type)) throw new ApiError(400, "invalid_type", `type must be one of: ${DEAL_TYPES.join(", ")}`);
+      if (type === "ai-ai" && account.kind !== "agent") {
+        throw new ApiError(403, "wrong_account_type", "Only AI agents can create AI-to-AI deals");
+      }
+      if (type === "human-human" && account.kind !== "human") {
+        throw new ApiError(403, "wrong_account_type", "Only people can create human-to-human deals");
+      }
+      const joinKind = type === "ai-ai" ? "agent" : type === "human-human" ? "human" : account.kind === "agent" ? "human" : "agent";
       if (deals.size >= MAX_DEALS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
-      if (openDealCount(agent.id) >= MAX_OPEN_DEALS_PER_AGENT) {
-        throw new ApiError(429, "too_many_open_deals", `You can have at most ${MAX_OPEN_DEALS_PER_AGENT} unfinished deals`);
+      if (openDealCount(account.id) >= MAX_OPEN_DEALS_PER_ACCOUNT) {
+        throw new ApiError(429, "too_many_open_deals", `You can have at most ${MAX_OPEN_DEALS_PER_ACCOUNT} unfinished deals`);
       }
       let code;
       do code = newInviteCode(); while (dealsByInvite.has(code));
       const deal = {
-        id: randomId("deal"), title, description, amount, deadlineHours,
-        state: "open", creatorId: agent.id,
-        buyerId: role === "buyer" ? agent.id : null,
-        sellerId: role === "seller" ? agent.id : null,
+        id: randomId("deal"), type, joinKind, title, description, amount, deadlineHours,
+        state: "open", creatorId: account.id,
+        buyerId: role === "buyer" ? account.id : null,
+        sellerId: role === "seller" ? account.id : null,
         inviteCode: code, createdAt: now(), fundedAt: null, deadlineAt: null,
-        history: [{ at: now(), state: "open", by: agent.id }],
+        history: [{ at: now(), state: "open", by: account.id }],
       };
       deals.set(deal.id, deal);
       dealsByInvite.set(code, deal.id);
-      return view(deal, agent.id);
+      return view(deal, account.id);
     },
 
-    joinDeal(agent, rawCode) {
+    joinDeal(account, rawCode) {
       const code = typeof rawCode === "string" ? rawCode.trim().toUpperCase() : "";
       const deal = deals.get(dealsByInvite.get(code));
       if (!deal) throw new ApiError(404, "invalid_invite", "Invite code not found or already used");
-      if (deal.creatorId === agent.id) throw new ApiError(400, "own_deal", "You can't join your own deal");
-      if (openDealCount(agent.id) >= MAX_OPEN_DEALS_PER_AGENT) {
-        throw new ApiError(429, "too_many_open_deals", `You can have at most ${MAX_OPEN_DEALS_PER_AGENT} unfinished deals`);
+      if (deal.creatorId === account.id) throw new ApiError(400, "own_deal", "You can't join your own deal");
+      if (account.kind !== deal.joinKind) {
+        throw new ApiError(403, "wrong_account_type", `This deal is for ${deal.joinKind === "agent" ? "an AI agent" : "a person"} to join`);
       }
-      if (deal.buyerId === null) deal.buyerId = agent.id;
-      else deal.sellerId = agent.id;
+      if (openDealCount(account.id) >= MAX_OPEN_DEALS_PER_ACCOUNT) {
+        throw new ApiError(429, "too_many_open_deals", `You can have at most ${MAX_OPEN_DEALS_PER_ACCOUNT} unfinished deals`);
+      }
+      if (deal.buyerId === null) deal.buyerId = account.id;
+      else deal.sellerId = account.id;
       dealsByInvite.delete(code); // single use
-      setState(deal, "joined", agent.id);
-      return view(deal, agent.id);
+      setState(deal, "joined", account.id);
+      return view(deal, account.id);
     },
 
-    getDeal(agent, dealId) {
-      return view(mustGetDeal(agent, dealId), agent.id);
+    getDeal(account, dealId) {
+      return view(mustGetDeal(account, dealId), account.id);
     },
 
-    listDeals(agent) {
+    listDeals(account) {
       return [...deals.values()]
-        .filter((d) => d.buyerId === agent.id || d.sellerId === agent.id)
+        .filter((d) => d.buyerId === account.id || d.sellerId === account.id)
         .sort((a, b) => b.createdAt - a.createdAt)
         .slice(0, 100)
-        .map((d) => view(d, agent.id));
+        .map((d) => view(d, account.id));
     },
 
-    fundDeal(agent, dealId) {
-      const deal = mustGetDeal(agent, dealId);
-      if (deal.buyerId !== agent.id) throw new ApiError(403, "not_buyer", "Only the buyer can fund the deal");
+    fundDeal(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer (sender) can fund the deal");
       if (deal.state !== "joined") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be "joined" to fund`);
-      if (agent.balance < deal.amount) throw new ApiError(402, "insufficient_credits", "Not enough play credits");
-      agent.balance -= deal.amount;
-      record(agent.id, -deal.amount, deal.id, "deposit into escrow");
+      if (account.balance < deal.amount) throw new ApiError(402, "insufficient_credits", "Not enough play credits");
+      account.balance -= deal.amount;
+      record(account.id, -deal.amount, deal.id, "deposit into escrow");
       record("escrow:" + deal.id, deal.amount, deal.id, "escrow funded");
       deal.fundedAt = now();
       deal.deadlineAt = deal.fundedAt + deal.deadlineHours * HOUR_MS;
-      setState(deal, "funded", agent.id);
-      return view(deal, agent.id);
+      setState(deal, "funded", account.id);
+      return view(deal, account.id);
     },
 
-    releaseDeal(agent, dealId) {
-      const deal = mustGetDeal(agent, dealId);
-      if (deal.buyerId !== agent.id) throw new ApiError(403, "not_buyer", "Only the buyer can release the funds");
+    releaseDeal(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer (sender) can release the funds");
       if (deal.state !== "funded") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be "funded" to release`);
-      const seller = agents.get(deal.sellerId);
+      const seller = accounts.get(deal.sellerId);
       const fee = Math.floor((deal.amount * FEE_BPS) / 10000);
       const payout = deal.amount - fee;
       record("escrow:" + deal.id, -deal.amount, deal.id, "escrow released");
@@ -206,46 +343,45 @@ function createStore({ now = () => Date.now() } = {}) {
         platform.balance += fee;
         record("platform", fee, deal.id, "platform fee");
       }
-      setState(deal, "released", agent.id);
-      return view(deal, agent.id);
+      setState(deal, "released", account.id);
+      return view(deal, account.id);
     },
 
-    refundDeal(agent, dealId) {
-      const deal = mustGetDeal(agent, dealId);
+    refundDeal(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
       if (deal.state !== "funded") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be "funded" to refund`);
-      const isSeller = deal.sellerId === agent.id;
+      const isSeller = deal.sellerId === account.id;
       if (!isSeller && now() < deal.deadlineAt) {
         throw new ApiError(403, "deadline_not_reached", "The buyer can only claim a refund after the deadline; the seller can refund any time");
       }
-      const buyer = agents.get(deal.buyerId);
+      const buyer = accounts.get(deal.buyerId);
       record("escrow:" + deal.id, -deal.amount, deal.id, "escrow refunded");
       buyer.balance += deal.amount;
       record(buyer.id, deal.amount, deal.id, "deal refund");
-      setState(deal, "refunded", agent.id);
-      return view(deal, agent.id);
+      setState(deal, "refunded", account.id);
+      return view(deal, account.id);
     },
 
-    cancelDeal(agent, dealId) {
-      const deal = mustGetDeal(agent, dealId);
+    cancelDeal(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
       if (deal.state !== "open" && deal.state !== "joined") {
         throw new ApiError(409, "bad_state", `Deal is ${deal.state}; only unfunded deals can be cancelled`);
       }
       dealsByInvite.delete(deal.inviteCode);
-      setState(deal, "cancelled", agent.id);
-      return view(deal, agent.id);
+      setState(deal, "cancelled", account.id);
+      return view(deal, account.id);
     },
 
-    // Credits are never created or destroyed after signup. Used by tests and /health.
+    // Credits are only ever created by welcome grants and test codes, and never lost after that.
     audit() {
       let held = 0;
       for (const d of deals.values()) if (d.state === "funded") held += d.amount;
       let balances = 0;
-      for (const a of agents.values()) balances += a.balance;
+      for (const a of accounts.values()) balances += a.balance;
       const actual = balances + held + platform.balance;
-      const expected = agents.size * STARTING_CREDITS;
-      return { ok: actual === expected, expected, actual, agents: agents.size, deals: deals.size };
+      return { ok: actual === minted, expected: minted, actual, accounts: accounts.size, deals: deals.size };
     },
   };
 }
 
-module.exports = { createStore, STARTING_CREDITS, FEE_BPS, MAX_AMOUNT };
+module.exports = { createStore, parseTestCodes, STARTING_CREDITS, FEE_BPS, MAX_AMOUNT, DEAL_TYPES };

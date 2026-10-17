@@ -7,7 +7,5 @@
     "test": "node --test",
     "demo": "node scripts/demo.js"
   },
-  "dependencies": {
-    "express": "^4.21.0"
-  }
+  "dependencies": {}
 }

@@ -1,15 +1,16 @@
+// End-to-end tests: a real server on a random port, real HTTP requests.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createApp } = require("../src/app");
+const { parseTestCodes } = require("../src/store");
 
 async function start(opts = {}) {
   const clock = { t: Date.parse("2026-10-17T00:00:00Z") };
-  const app = createApp({ now: () => clock.t, ...opts });
-  const server = await new Promise((resolve) => {
-    const s = app.listen(0, "127.0.0.1", () => resolve(s));
-  });
+  const server = createApp({ now: () => clock.t, ...opts });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  async function call(method, path, { key, body, headers } = {}) {
+
+  async function call(method, path, { key, body, headers, raw } = {}) {
     const res = await fetch(base + path, {
       method,
       headers: {
@@ -17,234 +18,225 @@ async function start(opts = {}) {
         ...(key ? { Authorization: `Bearer ${key}` } : {}),
         ...headers,
       },
-      body: body !== undefined ? (typeof body === "string" ? body : JSON.stringify(body)) : undefined,
+      body: body === undefined ? raw : typeof body === "string" ? body : JSON.stringify(body),
     });
     const text = await res.text();
     let json = null;
-    try { json = JSON.parse(text); } catch {}
+    try { json = JSON.parse(text); } catch { /* not JSON */ }
     return { status: res.status, json, text, headers: res.headers };
   }
-  const register = async (name) => (await call("POST", "/v1/agents/register", { body: { name } })).json;
-  return { call, register, clock, app, close: () => new Promise((r) => server.close(r)) };
+  const agent = async (name) => (await call("POST", "/v1/agents/register", { body: { name } })).json;
+  const human = async (username, password = "password-123") => (await call("POST", "/v1/humans/signup", { body: { username, password } })).json;
+  const close = () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); });
+  return { call, agent, human, clock, server, close };
 }
 
-async function fundedDeal(ctx, amount = 50, extra = {}) {
-  const buyer = await ctx.register("buyer");
-  const seller = await ctx.register("seller");
-  const d = await ctx.call("POST", "/v1/deals", { key: buyer.apiKey, body: { title: "Job", amount, ...extra } });
+const balance = async (ctx, key) => (await ctx.call("GET", "/v1/me", { key })).json.balance;
+
+async function withServer(opts, fn) {
+  if (typeof opts === "function") { fn = opts; opts = {}; }
+  const ctx = await start(opts);
+  try { await fn(ctx); } finally { await ctx.close(); }
+}
+
+test("AI to AI deal over HTTP, end to end", () => withServer(async (ctx) => {
+  const buyer = await ctx.agent("buyer-bot");
+  const seller = await ctx.agent("seller-bot");
+  assert.match(buyer.apiKey, /^vlc_[0-9a-f]{48}$/);
+  assert.equal(buyer.balance, 100);
+
+  const d = await ctx.call("POST", "/v1/deals", { key: buyer.apiKey, body: { title: "Job", amount: 100, type: "ai-ai" } });
   assert.equal(d.status, 201);
+  assert.equal(d.json.type, "ai-ai");
   const j = await ctx.call("POST", "/v1/deals/join", { key: seller.apiKey, body: { inviteCode: d.json.inviteCode } });
   assert.equal(j.status, 200);
-  const f = await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: buyer.apiKey });
-  assert.equal(f.status, 200);
-  return { buyer, seller, dealId: d.json.id };
-}
+  assert.equal((await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: buyer.apiKey })).json.state, "funded");
+  assert.equal(await balance(ctx, buyer.apiKey), 0);
+  const r = await ctx.call("POST", `/v1/deals/${d.json.id}/release`, { key: buyer.apiKey });
+  assert.equal(r.json.state, "released");
+  assert.equal(await balance(ctx, seller.apiKey), 199); // 100 + 100 - 1% fee
+  assert.equal((await ctx.call("GET", "/health")).json.ledger, "balanced");
+}));
 
-const balance = async (ctx, agent) => (await ctx.call("GET", "/v1/me", { key: agent.apiKey })).json.balance;
+test("people: signup, login, session token works like an API key, logout ends it", () => withServer(async (ctx) => {
+  const s = await ctx.human("Ann_Person");
+  assert.match(s.token, /^vls_[0-9a-f]{48}$/);
+  assert.equal(s.account.kind, "human");
+  assert.equal(s.account.name, "ann_person");
+  assert.equal((await ctx.call("GET", "/v1/me", { key: s.token })).json.balance, 100);
 
-test("register gives an api key and 100 credits; key works", async () => {
-  const ctx = await start();
-  try {
-    const a = await ctx.register("alpha");
-    assert.match(a.apiKey, /^vlc_[0-9a-f]{48}$/);
-    assert.equal(a.balance, 100);
-    assert.equal(await balance(ctx, a), 100);
-  } finally { await ctx.close(); }
+  const login = await ctx.call("POST", "/v1/humans/login", { body: { username: "ANN_person", password: "password-123" } });
+  assert.equal(login.status, 200);
+  const bad = await ctx.call("POST", "/v1/humans/login", { body: { username: "ann_person", password: "nope-nope-1" } });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.json.error.code, "invalid_login");
+  assert.equal(JSON.stringify(login.json).includes("password-123"), false);
+
+  assert.equal((await ctx.call("POST", "/v1/logout", { key: login.json.token })).status, 200);
+  assert.equal((await ctx.call("GET", "/v1/me", { key: login.json.token })).status, 401);
+  assert.equal((await ctx.call("GET", "/v1/me", { key: s.token })).status, 200);
+}));
+
+test("human to human and AI and human deals respect account types", () => withServer(async (ctx) => {
+  const ann = await human("ann");
+  async function human(name) { const r = await ctx.human(name); return { key: r.token }; }
+  const bob = await human("bob");
+  const bot = await ctx.agent("bot");
+
+  const hh = await ctx.call("POST", "/v1/deals", { key: ann.key, body: { title: "swap", amount: 10, type: "human-human" } });
+  assert.equal(hh.status, 201);
+  const botJoin = await ctx.call("POST", "/v1/deals/join", { key: bot.apiKey, body: { inviteCode: hh.json.inviteCode } });
+  assert.equal(botJoin.status, 403);
+  assert.equal(botJoin.json.error.code, "wrong_account_type");
+  assert.equal((await ctx.call("POST", "/v1/deals/join", { key: bob.key, body: { inviteCode: hh.json.inviteCode } })).status, 200);
+
+  const nope = await ctx.call("POST", "/v1/deals", { key: ann.key, body: { title: "x", amount: 5, type: "ai-ai" } });
+  assert.equal(nope.status, 403);
+
+  // person pays an AI agent
+  const ah = await ctx.call("POST", "/v1/deals", { key: ann.key, body: { title: "code", amount: 50, type: "ai-human", role: "buyer" } });
+  assert.equal(ah.json.joinKind, "agent");
+  assert.equal((await ctx.call("POST", "/v1/deals/join", { key: bot.apiKey, body: { inviteCode: ah.json.inviteCode } })).status, 200);
+  assert.equal((await ctx.call("POST", `/v1/deals/${ah.json.id}/fund`, { key: ann.key })).status, 200);
+  assert.equal((await ctx.call("POST", `/v1/deals/${ah.json.id}/release`, { key: ann.key })).status, 200);
+  assert.equal(await balance(ctx, bot.apiKey), 150);
+  const seen = await ctx.call("GET", `/v1/deals/${ah.json.id}`, { key: bot.apiKey });
+  assert.deepEqual([seen.json.buyer.kind, seen.json.seller.kind].sort(), ["agent", "human"]);
+}));
+
+test("test credits: off by default, on with a code from the environment", async () => {
+  await withServer(async (ctx) => {
+    const a = await ctx.agent("a");
+    const r = await ctx.call("POST", "/v1/credits/redeem", { key: a.apiKey, body: { code: "whatever-code" } });
+    assert.equal(r.status, 404);
+    assert.equal(r.json.error.code, "redeem_disabled");
+    assert.equal((await ctx.call("GET", "/health")).json.testCredits, false);
+  });
+  await withServer({ testCodes: parseTestCodes("secret-test-code=250") }, async (ctx) => {
+    const p = await ctx.human("tester");
+    assert.equal((await ctx.call("GET", "/health")).json.testCredits, true);
+    const bad = await ctx.call("POST", "/v1/credits/redeem", { key: p.token, body: { code: "wrong-code-1" } });
+    assert.equal(bad.status, 400);
+    const ok = await ctx.call("POST", "/v1/credits/redeem", { key: p.token, body: { code: "secret-test-code" } });
+    assert.deepEqual(ok.json, { added: 250, balance: 350 });
+    assert.equal((await ctx.call("POST", "/v1/credits/redeem", { body: { code: "secret-test-code" } })).status, 401);
+    assert.equal((await ctx.call("GET", "/health")).json.ledger, "balanced");
+    assert.equal((await ctx.call("GET", "/health")).text.includes("secret-test-code"), false);
+  });
 });
 
-test("happy path: create, join, fund, release pays seller minus 1% fee", async () => {
-  const ctx = await start();
-  try {
-    const { buyer, seller, dealId } = await fundedDeal(ctx, 50);
-    assert.equal(await balance(ctx, buyer), 50);
-    const r = await ctx.call("POST", `/v1/deals/${dealId}/release`, { key: buyer.apiKey });
-    assert.equal(r.status, 200);
-    assert.equal(r.json.state, "released");
-    assert.equal(await balance(ctx, seller), 150); // fee = floor(50 * 1%) = 0
-    assert.equal(await balance(ctx, buyer), 50);
-  } finally { await ctx.close(); }
-});
+test("refund rules and idempotency keys", () => withServer(async (ctx) => {
+  const a = await ctx.agent("a");
+  const b = await ctx.agent("b");
+  const d = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "t", amount: 30, deadlineHours: 2 } });
+  await ctx.call("POST", "/v1/deals/join", { key: b.apiKey, body: { inviteCode: d.json.inviteCode } });
+  const h = { "Idempotency-Key": "fund-1" };
+  const one = await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey, headers: h });
+  const two = await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey, headers: h });
+  assert.equal(one.status, 200);
+  assert.equal(two.status, 200);
+  assert.equal(two.headers.get("idempotent-replay"), "true");
+  assert.equal(await balance(ctx, a.apiKey), 70);
+  assert.equal((await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey })).status, 409);
 
-test("fee is floor(amount * 1%) and credits are conserved", async () => {
-  const ctx = await start();
-  try {
-    const { buyer, seller, dealId } = await fundedDeal(ctx, 99); // fee floor(0.99) = 0
-    await ctx.call("POST", `/v1/deals/${dealId}/release`, { key: buyer.apiKey });
-    assert.equal(await balance(ctx, seller), 199);
+  const early = await ctx.call("POST", `/v1/deals/${d.json.id}/refund`, { key: a.apiKey });
+  assert.equal(early.json.error.code, "deadline_not_reached");
+  ctx.clock.t += 3 * 3600 * 1000;
+  assert.equal((await ctx.call("POST", `/v1/deals/${d.json.id}/refund`, { key: a.apiKey })).json.state, "refunded");
+  assert.equal(await balance(ctx, a.apiKey), 100);
+  assert.equal((await ctx.call("POST", "/v1/deals", { key: a.apiKey, headers: { "Idempotency-Key": "k".repeat(65) }, body: { title: "t", amount: 1 } })).status, 400);
+}));
 
-    // 100 credits -> fee 1
-    const b2 = await ctx.register("b2");
-    const s2 = await ctx.register("s2");
-    const d = await ctx.call("POST", "/v1/deals", { key: b2.apiKey, body: { title: "x", amount: 100 } });
-    await ctx.call("POST", "/v1/deals/join", { key: s2.apiKey, body: { inviteCode: d.json.inviteCode } });
-    await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: b2.apiKey });
-    await ctx.call("POST", `/v1/deals/${d.json.id}/release`, { key: b2.apiKey });
-    assert.equal(await balance(ctx, b2), 0);
-    assert.equal(await balance(ctx, s2), 100 + 99);
-    assert.equal(ctx.app.locals.store.audit().ok, true);
-    const health = await ctx.call("GET", "/health");
-    assert.equal(health.json.ledger, "balanced");
-  } finally { await ctx.close(); }
-});
+test("outsiders can't see or touch a deal; wrong keys are rejected", () => withServer(async (ctx) => {
+  const a = await ctx.agent("a");
+  const b = await ctx.agent("b");
+  const outsider = await ctx.agent("outsider");
+  const d = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "t", amount: 5 } });
+  await ctx.call("POST", "/v1/deals/join", { key: b.apiKey, body: { inviteCode: d.json.inviteCode } });
+  assert.equal((await ctx.call("GET", `/v1/deals/${d.json.id}`, { key: outsider.apiKey })).status, 404);
+  assert.equal((await ctx.call("POST", `/v1/deals/${d.json.id}/cancel`, { key: outsider.apiKey })).status, 404);
+  assert.equal((await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: b.apiKey })).status, 403);
+  assert.equal((await ctx.call("GET", "/v1/me")).status, 401);
+  assert.equal((await ctx.call("GET", "/v1/me", { key: "vlc_nope" })).status, 401);
+  assert.equal((await ctx.call("GET", "/v1/deals")).status, 401);
+}));
 
-test("seller can refund any time; buyer can only after the deadline", async () => {
-  const ctx = await start();
-  try {
-    const { buyer, seller, dealId } = await fundedDeal(ctx, 40, { deadlineHours: 2 });
-    const early = await ctx.call("POST", `/v1/deals/${dealId}/refund`, { key: buyer.apiKey });
-    assert.equal(early.status, 403);
-    assert.equal(early.json.error.code, "deadline_not_reached");
-    ctx.clock.t += 3 * 3600 * 1000;
-    const late = await ctx.call("POST", `/v1/deals/${dealId}/refund`, { key: buyer.apiKey });
-    assert.equal(late.status, 200);
-    assert.equal(late.json.state, "refunded");
-    assert.equal(await balance(ctx, buyer), 100);
-    assert.equal(await balance(ctx, seller), 100);
+test("bad requests get clear errors", () => withServer(async (ctx) => {
+  const a = await ctx.agent("a");
+  const bad = (body) => ctx.call("POST", "/v1/deals", { key: a.apiKey, body });
+  assert.equal((await bad({ title: "t", amount: 0 })).json.error.code, "invalid_amount");
+  assert.equal((await bad({ title: "t", amount: "5" })).json.error.code, "invalid_amount");
+  assert.equal((await bad({ title: "", amount: 5 })).json.error.code, "invalid_title");
+  assert.equal((await bad({ title: "t", amount: 5, type: "nope" })).json.error.code, "invalid_type");
+  assert.equal((await ctx.call("POST", "/v1/agents/register", { body: {} })).json.error.code, "invalid_name");
+  assert.equal((await ctx.call("POST", "/v1/agents/register", { body: "{not json" })).json.error.code, "invalid_json");
+  assert.equal((await ctx.call("POST", "/v1/agents/register", { body: "[1,2]" })).json.error.code, "invalid_json");
+  assert.equal((await ctx.call("POST", "/v1/agents/register", { raw: "name=x", headers: { "Content-Type": "text/plain" } })).status, 415);
+  const huge = await ctx.call("POST", "/v1/agents/register", { body: JSON.stringify({ name: "x".repeat(20000) }) });
+  assert.equal(huge.status, 413);
+  assert.equal((await ctx.call("GET", "/v1/nothing", { key: a.apiKey })).status, 404);
+  const wrongMethod = await ctx.call("DELETE", "/v1/me", { key: a.apiKey });
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.headers.get("allow"), "GET");
+}));
 
-    const second = await fundedDeal(ctx, 10);
-    const sr = await ctx.call("POST", `/v1/deals/${second.dealId}/refund`, { key: second.seller.apiKey });
-    assert.equal(sr.status, 200);
-    assert.equal(await balance(ctx, second.buyer), 100);
-    assert.equal(ctx.app.locals.store.audit().ok, true);
-  } finally { await ctx.close(); }
-});
-
-test("only the buyer can fund or release; outsiders get 404", async () => {
-  const ctx = await start();
-  try {
-    const { buyer, seller, dealId } = await fundedDeal(ctx, 20);
-    const outsider = await ctx.register("outsider");
-    assert.equal((await ctx.call("POST", `/v1/deals/${dealId}/release`, { key: seller.apiKey })).status, 403);
-    assert.equal((await ctx.call("GET", `/v1/deals/${dealId}`, { key: outsider.apiKey })).status, 404);
-    assert.equal((await ctx.call("POST", `/v1/deals/${dealId}/release`, { key: outsider.apiKey })).status, 404);
-    assert.equal((await ctx.call("GET", `/v1/deals/${dealId}`, { key: seller.apiKey })).status, 200);
-    // releasing twice is rejected and pays nothing extra
-    assert.equal((await ctx.call("POST", `/v1/deals/${dealId}/release`, { key: buyer.apiKey })).status, 200);
-    assert.equal((await ctx.call("POST", `/v1/deals/${dealId}/release`, { key: buyer.apiKey })).status, 409);
-    assert.equal(await balance(ctx, seller), 120);
-  } finally { await ctx.close(); }
-});
-
-test("invite codes are single use, hidden from non-creators, and can't be joined by the creator", async () => {
-  const ctx = await start();
-  try {
-    const a = await ctx.register("a");
-    const b = await ctx.register("b");
-    const c = await ctx.register("c");
-    const d = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "t", amount: 5, role: "seller" } });
-    assert.ok(d.json.inviteCode);
-    assert.equal((await ctx.call("POST", "/v1/deals/join", { key: a.apiKey, body: { inviteCode: d.json.inviteCode } })).status, 400);
-    const j = await ctx.call("POST", "/v1/deals/join", { key: b.apiKey, body: { inviteCode: d.json.inviteCode.toLowerCase() } });
-    assert.equal(j.status, 200);
-    assert.equal(j.json.yourRole, "buyer");
-    assert.equal(j.json.inviteCode, undefined);
-    assert.equal((await ctx.call("POST", "/v1/deals/join", { key: c.apiKey, body: { inviteCode: d.json.inviteCode } })).status, 404);
-    const again = await ctx.call("GET", `/v1/deals/${d.json.id}`, { key: a.apiKey });
-    assert.equal(again.json.inviteCode, undefined);
-  } finally { await ctx.close(); }
-});
-
-test("cannot fund without enough credits or before someone joins", async () => {
-  const ctx = await start();
-  try {
-    const a = await ctx.register("a");
-    const b = await ctx.register("b");
-    const d = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "t", amount: 5 } });
-    const early = await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey });
-    assert.equal(early.status, 409);
-    const big = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "big", amount: 5000 } });
-    await ctx.call("POST", "/v1/deals/join", { key: b.apiKey, body: { inviteCode: big.json.inviteCode } });
-    const poor = await ctx.call("POST", `/v1/deals/${big.json.id}/fund`, { key: a.apiKey });
-    assert.equal(poor.status, 402);
-    assert.equal(await balance(ctx, a), 100);
-  } finally { await ctx.close(); }
-});
-
-test("cancel works before funding but not after", async () => {
-  const ctx = await start();
-  try {
-    const a = await ctx.register("a");
-    const d = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "t", amount: 5 } });
-    const c = await ctx.call("POST", `/v1/deals/${d.json.id}/cancel`, { key: a.apiKey });
-    assert.equal(c.json.state, "cancelled");
-    assert.equal((await ctx.call("POST", "/v1/deals/join", { key: (await ctx.register("z")).apiKey, body: { inviteCode: d.json.inviteCode } })).status, 404);
-    const { buyer, dealId } = await fundedDeal(ctx, 10);
-    assert.equal((await ctx.call("POST", `/v1/deals/${dealId}/cancel`, { key: buyer.apiKey })).status, 409);
-  } finally { await ctx.close(); }
-});
-
-test("idempotency key makes a retried fund request a no-op", async () => {
-  const ctx = await start();
-  try {
-    const a = await ctx.register("a");
-    const b = await ctx.register("b");
-    const d = await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "t", amount: 30 } });
-    await ctx.call("POST", "/v1/deals/join", { key: b.apiKey, body: { inviteCode: d.json.inviteCode } });
-    const h = { "Idempotency-Key": "fund-1" };
-    const one = await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey, headers: h });
-    const two = await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey, headers: h });
-    assert.equal(one.status, 200);
-    assert.equal(two.status, 200);
-    assert.equal(two.headers.get("idempotent-replay"), "true");
-    assert.equal(await balance(ctx, a), 70);
-    // without the key, the same retry is rejected as a bad state
-    assert.equal((await ctx.call("POST", `/v1/deals/${d.json.id}/fund`, { key: a.apiKey })).status, 409);
-  } finally { await ctx.close(); }
-});
-
-test("auth and validation errors", async () => {
-  const ctx = await start();
-  try {
-    assert.equal((await ctx.call("GET", "/v1/me")).status, 401);
-    assert.equal((await ctx.call("GET", "/v1/me", { key: "vlc_nope" })).status, 401);
-    const a = await ctx.register("a");
-    const bad = (body) => ctx.call("POST", "/v1/deals", { key: a.apiKey, body });
-    assert.equal((await bad({ title: "t", amount: 0 })).status, 400);
-    assert.equal((await bad({ title: "t", amount: 1.5 })).status, 400);
-    assert.equal((await bad({ title: "t", amount: "5" })).status, 400);
-    assert.equal((await bad({ title: "t", amount: 10001 })).status, 400);
-    assert.equal((await bad({ title: "", amount: 5 })).status, 400);
-    assert.equal((await bad({ title: "t", amount: 5, role: "boss" })).status, 400);
-    assert.equal((await bad({ title: "t", amount: 5, deadlineHours: 0 })).status, 400);
-    assert.equal((await ctx.call("POST", "/v1/agents/register", { body: {} })).status, 400);
-    assert.equal((await ctx.call("POST", "/v1/agents/register", { body: "{not json" })).json.error.code, "invalid_json");
-    assert.equal((await ctx.call("GET", "/v1/nothing", { key: a.apiKey })).status, 404);
-  } finally { await ctx.close(); }
-});
-
-test("registration is rate limited per IP", async () => {
-  const ctx = await start({ registerLimit: 3 });
-  try {
+test("rate limits: registration, login and joins", async () => {
+  await withServer({ registerLimit: 3 }, async (ctx) => {
     for (let i = 0; i < 3; i++) assert.equal((await ctx.call("POST", "/v1/agents/register", { body: { name: "n" + i } })).status, 201);
     const blocked = await ctx.call("POST", "/v1/agents/register", { body: { name: "n4" } });
     assert.equal(blocked.status, 429);
     assert.ok(blocked.headers.get("retry-after"));
-  } finally { await ctx.close(); }
+  });
+  await withServer({ loginLimit: 3 }, async (ctx) => {
+    await ctx.human("limited");
+    for (let i = 0; i < 2; i++) assert.equal((await ctx.call("POST", "/v1/humans/login", { body: { username: "limited", password: "wrong-pass-1" } })).status, 401);
+    assert.equal((await ctx.call("POST", "/v1/humans/login", { body: { username: "limited", password: "wrong-pass-2" } })).status, 401);
+    assert.equal((await ctx.call("POST", "/v1/humans/login", { body: { username: "limited", password: "password-123" } })).status, 429);
+  });
+  await withServer({ joinLimit: 2 }, async (ctx) => {
+    const a = await ctx.agent("a");
+    const join = () => ctx.call("POST", "/v1/deals/join", { key: a.apiKey, body: { inviteCode: "AAAA-AAAA" } });
+    assert.equal((await join()).status, 404);
+    assert.equal((await join()).status, 404);
+    assert.equal((await join()).status, 429);
+  });
 });
 
-test("an agent can't hold more than 20 unfinished deals", async () => {
-  const ctx = await start();
-  try {
-    const a = await ctx.register("a");
-    for (let i = 0; i < 20; i++) {
-      assert.equal((await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "d" + i, amount: 1 } })).status, 201);
-    }
-    assert.equal((await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "one too many", amount: 1 } })).status, 429);
-  } finally { await ctx.close(); }
-});
+test("pages, security headers and no leaked secrets", () => withServer(async (ctx) => {
+  for (const [path, needle] of [["/", "Create deal"], ["/docs", "Idempotency-Key"], ["/login", "Sign up"], ["/dashboard", "Create a deal"], ["/deal", "Loading"]]) {
+    const r = await ctx.call("GET", path);
+    assert.equal(r.status, 200, path);
+    assert.match(r.text, new RegExp(needle), path);
+    assert.match(r.headers.get("content-type"), /text\/html/);
+  }
+  const css = await ctx.call("GET", "/style.css");
+  assert.match(css.headers.get("content-type"), /text\/css/);
+  const js = await ctx.call("GET", "/app.js");
+  assert.match(js.headers.get("content-type"), /javascript/);
+  const home = await ctx.call("GET", "/");
+  assert.equal(home.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(home.headers.get("x-frame-options"), "DENY");
+  assert.match(home.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.equal((await ctx.call("GET", "/docs/")).status, 200); // trailing slash tolerated
+  assert.equal((await ctx.call("GET", "/nope")).status, 404);
+  assert.equal((await ctx.call("GET", "/../package.json")).status, 404);
+  assert.equal((await ctx.call("GET", "/%2e%2e/package.json")).status, 404);
+  assert.equal((await ctx.call("GET", "/src/store.js")).status, 404);
+  assert.equal((await ctx.call("POST", "/docs", { body: {} })).status, 405);
+  assert.equal(home.headers.get("x-powered-by"), null);
+  // no inline scripts or styles anywhere, which is what the CSP relies on
+  for (const p of ["/", "/docs", "/login", "/dashboard", "/deal"]) {
+    const t = (await ctx.call("GET", p)).text;
+    assert.equal(/<script(?![^>]*\bsrc=)/i.test(t), false, p + " has an inline script");
+    assert.equal(/<style/i.test(t), false, p + " has an inline style block");
+    assert.equal(/\sstyle=/i.test(t), false, p + " has a style attribute");
+  }
+}));
 
-test("pages are served and the api key is never stored in plain text", async () => {
-  const ctx = await start();
-  try {
-    const home = await ctx.call("GET", "/");
-    assert.equal(home.status, 200);
-    assert.match(home.text, /Valence/);
-    const docs = await ctx.call("GET", "/docs");
-    assert.equal(docs.status, 200);
-    assert.match(docs.text, /Idempotency-Key/);
-    assert.equal(docs.headers.get("x-content-type-options"), "nosniff");
-    const a = await ctx.register("a");
-    assert.equal(JSON.stringify(ctx.app.locals.store.me({ id: a.agentId })).includes(a.apiKey), false);
-    assert.equal((await ctx.call("GET", "/health")).json.status, "online");
-  } finally { await ctx.close(); }
-});
+test("an agent can hold at most 20 unfinished deals", () => withServer(async (ctx) => {
+  const a = await ctx.agent("a");
+  for (let i = 0; i < 20; i++) {
+    assert.equal((await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "d" + i, amount: 1 } })).status, 201);
+  }
+  assert.equal((await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "one too many", amount: 1 } })).status, 429);
+}));

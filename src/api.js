@@ -1,117 +1,130 @@
-const express = require("express");
 const { ApiError } = require("./errors");
+const { clientIp, bearer, sendJson, readJson, limiter } = require("./http");
 
-// Fixed-window rate limiter keyed by client IP. In-memory, so per server instance.
-function rateLimiter({ windowMs, max, code = "rate_limited" }) {
-  const hits = new Map(); // ip -> { count, resetAt }
-  return (req, res, next) => {
-    const t = Date.now();
-    if (hits.size > 10000) {
-      for (const [k, v] of hits) if (v.resetAt <= t) hits.delete(k);
-    }
-    const key = req.ip || "unknown";
-    let h = hits.get(key);
-    if (!h || h.resetAt <= t) {
-      h = { count: 0, resetAt: t + windowMs };
-      hits.set(key, h);
-    }
-    h.count++;
-    if (h.count > max) {
-      res.set("Retry-After", String(Math.ceil((h.resetAt - t) / 1000)));
-      return next(new ApiError(429, code, "Too many requests, slow down"));
-    }
-    next();
-  };
-}
-
+// Builds the /v1 request handler. Routes are plain data: method, path pattern, options, handler.
 function createApi(store, opts = {}) {
-  const router = express.Router();
-  const idempotencyCache = new Map(); // "agentId|path|key" -> { status, body }
+  const routes = [];
+  const idempotencyCache = new Map(); // "accountId|METHOD path|key" -> { status, body }
   const MAX_IDEMPOTENCY_ENTRIES = 10000;
+  const globalLimit = limiter({ windowMs: 60 * 1000, max: opts.globalLimit || 300 });
 
-  router.use(rateLimiter({ windowMs: 60 * 1000, max: opts.globalLimit || 300 }));
-
-  function auth(req, res, next) {
-    const header = req.get("authorization") || "";
-    const match = /^Bearer (\S+)$/.exec(header);
-    const agent = match ? store.authenticate(match[1]) : null;
-    if (!agent) return next(new ApiError(401, "unauthorized", "Missing or invalid API key. Send: Authorization: Bearer <apiKey>"));
-    req.agent = agent;
-    next();
+  function add(method, pattern, cfg, handler) {
+    const keys = [];
+    const re = new RegExp("^" + pattern.replace(/:([a-zA-Z]+)/g, (_, k) => (keys.push(k), "([^/]+)")) + "$");
+    routes.push({ method, re, keys, auth: false, mutate: false, limit: null, ...cfg, handler });
   }
 
-  // Wraps a state-changing handler so a retried request with the same Idempotency-Key
-  // returns the original result instead of acting twice.
-  function mutate(fn) {
-    return (req, res, next) => {
-      try {
-        const key = req.get("idempotency-key");
-        if (key && key.length > 64) throw new ApiError(400, "invalid_idempotency_key", "Idempotency-Key must be 64 characters or fewer");
-        const cacheKey = key ? `${req.agent.id}|${req.path}|${key}` : null;
-        if (cacheKey && idempotencyCache.has(cacheKey)) {
-          const hit = idempotencyCache.get(cacheKey);
-          res.set("Idempotent-Replay", "true");
-          return res.status(hit.status).json(hit.body);
-        }
-        const result = fn(req);
-        const status = result.status || 200;
-        if (cacheKey) {
-          idempotencyCache.set(cacheKey, { status, body: result.body });
-          if (idempotencyCache.size > MAX_IDEMPOTENCY_ENTRIES) {
-            idempotencyCache.delete(idempotencyCache.keys().next().value);
-          }
-        }
-        res.status(status).json(result.body);
-      } catch (err) {
-        next(err);
-      }
-    };
-  }
+  const registerLimit = limiter({ windowMs: 3600 * 1000, max: opts.registerLimit || 20, code: "register_rate_limited" });
+  const loginLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.loginLimit || 30, code: "login_rate_limited" });
+  const joinLimit = limiter({ windowMs: 60 * 1000, max: opts.joinLimit || 20, code: "join_rate_limited" });
+  const redeemLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.redeemLimit || 20, code: "redeem_rate_limited" });
 
-  router.post(
-    "/agents/register",
-    rateLimiter({ windowMs: 60 * 60 * 1000, max: opts.registerLimit || 20, code: "register_rate_limited" }),
-    (req, res, next) => {
-      try {
-        res.status(201).json({
-          ...store.registerAgent(req.body && req.body.name),
-          currency: "play-credits",
-          notice: "Save your apiKey now. It is shown only once. Play credits have no real-world value.",
-        });
-      } catch (err) {
-        next(err);
-      }
-    }
-  );
-
-  router.get("/me", auth, (req, res) => res.json(store.me(req.agent)));
-
-  router.get("/deals", auth, (req, res) => res.json({ deals: store.listDeals(req.agent) }));
-
-  router.post("/deals", auth, mutate((req) => ({ status: 201, body: store.createDeal(req.agent, req.body || {}) })));
-
-  router.post(
-    "/deals/join",
-    rateLimiter({ windowMs: 60 * 1000, max: opts.joinLimit || 20, code: "join_rate_limited" }),
-    auth,
-    mutate((req) => ({ body: store.joinDeal(req.agent, req.body && req.body.inviteCode) }))
-  );
-
-  router.get("/deals/:id", auth, (req, res, next) => {
-    try {
-      res.json(store.getDeal(req.agent, req.params.id));
-    } catch (err) {
-      next(err);
-    }
+  // ---- accounts ----
+  add("POST", "/agents/register", { limit: registerLimit }, ({ body }) => ({
+    status: 201,
+    body: {
+      ...store.registerAgent(body.name),
+      currency: "play-credits",
+      notice: "Save your apiKey now. It is shown only once. Play credits have no real-world value.",
+    },
+  }));
+  add("POST", "/humans/signup", { limit: registerLimit }, async ({ body }) => ({
+    status: 201,
+    body: await store.registerHuman(body.username, body.password),
+  }));
+  add("POST", "/humans/login", { limit: loginLimit }, async ({ body }) => ({
+    body: await store.loginHuman(body.username, body.password),
+  }));
+  add("POST", "/logout", { auth: true }, ({ token }) => {
+    store.logout(token);
+    return { body: { ok: true } };
   });
+  add("GET", "/me", { auth: true }, ({ account }) => ({ body: store.me(account) }));
+  add("POST", "/credits/redeem", { auth: true, limit: redeemLimit }, ({ account, body }) => ({
+    body: store.redeemCredits(account, body.code),
+  }));
 
+  // ---- deals ----
+  add("GET", "/deals", { auth: true }, ({ account }) => ({ body: { deals: store.listDeals(account) } }));
+  add("POST", "/deals", { auth: true, mutate: true }, ({ account, body }) => ({
+    status: 201,
+    body: store.createDeal(account, body),
+  }));
+  add("POST", "/deals/join", { auth: true, mutate: true, limit: joinLimit }, ({ account, body }) => ({
+    body: store.joinDeal(account, body.inviteCode),
+  }));
+  add("GET", "/deals/:id", { auth: true }, ({ account, params }) => ({ body: store.getDeal(account, params.id) }));
   for (const action of ["fund", "release", "refund", "cancel"]) {
-    router.post(`/deals/:id/${action}`, auth, mutate((req) => ({ body: store[action + "Deal"](req.agent, req.params.id) })));
+    add("POST", `/deals/:id/${action}`, { auth: true, mutate: true }, ({ account, params }) => ({
+      body: store[action + "Deal"](account, params.id),
+    }));
   }
 
-  router.use((req, res, next) => next(new ApiError(404, "not_found", "No such endpoint")));
+  return async function handleApi(req, res, apiPath) {
+    const ip = clientIp(req);
+    globalLimit(ip);
 
-  return router;
+    let found = null;
+    const allowed = new Set();
+    for (const r of routes) {
+      const m = r.re.exec(apiPath);
+      if (!m) continue;
+      if (r.method === req.method) {
+        found = { r, m };
+        break;
+      }
+      allowed.add(r.method);
+    }
+    if (!found) {
+      if (allowed.size) {
+        const err = new ApiError(405, "method_not_allowed", "Method not allowed for this endpoint");
+        err.headers = { Allow: [...allowed].join(", ") };
+        throw err;
+      }
+      throw new ApiError(404, "not_found", "No such endpoint");
+    }
+    const { r, m } = found;
+
+    const params = {};
+    r.keys.forEach((k, i) => {
+      try {
+        params[k] = decodeURIComponent(m[i + 1]);
+      } catch {
+        throw new ApiError(400, "bad_request", "Malformed URL");
+      }
+    });
+
+    const body = req.method === "POST" ? await readJson(req) : {};
+    if (r.limit) r.limit(ip);
+
+    let account = null;
+    let token = null;
+    if (r.auth) {
+      token = bearer(req);
+      account = token ? store.authenticate(token) : null;
+      if (!account) throw new ApiError(401, "unauthorized", "Missing or invalid credentials. Send: Authorization: Bearer <apiKey or session token>");
+    }
+
+    // A retried request with the same Idempotency-Key returns the original result instead of acting twice.
+    let cacheKey = null;
+    if (r.mutate && req.headers["idempotency-key"] !== undefined) {
+      const key = req.headers["idempotency-key"];
+      if (typeof key !== "string" || key.length === 0 || key.length > 64) {
+        throw new ApiError(400, "invalid_idempotency_key", "Idempotency-Key must be 1-64 characters");
+      }
+      cacheKey = `${account.id}|${req.method} ${apiPath}|${key}`;
+      const hit = idempotencyCache.get(cacheKey);
+      if (hit) return sendJson(res, hit.status, hit.body, { "Idempotent-Replay": "true" });
+    }
+
+    const result = await r.handler({ account, token, params, body });
+    const status = result.status || 200;
+    if (cacheKey) {
+      idempotencyCache.set(cacheKey, { status, body: result.body });
+      if (idempotencyCache.size > MAX_IDEMPOTENCY_ENTRIES) idempotencyCache.delete(idempotencyCache.keys().next().value);
+    }
+    sendJson(res, status, result.body);
+  };
 }
 
 module.exports = { createApi };

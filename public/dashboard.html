@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard - Valence</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-page="dashboard">
+  <header class="site"><nav id="nav" class="nav" aria-label="Main"><a class="logo" href="/">Valence</a></nav></header>
+  <main class="wrap">
+    <p id="msg" class="flash" role="status" aria-live="polite" hidden></p>
+
+    <section class="card" aria-labelledby="bal-h">
+      <div class="row between">
+        <div>
+          <h2 id="bal-h">Signed in as <span id="who"></span> <span class="badge" id="kind"></span></h2>
+          <div><span class="balance" id="balance">-</span> <span class="muted">play credits</span></div>
+          <p class="dim">1 credit = $1 USD once real deposits exist. Right now credits are fake.</p>
+        </div>
+        <form id="redeem-form">
+          <label for="redeem-code">Add test credits</label>
+          <div class="row">
+            <input id="redeem-code" name="code" autocomplete="off" placeholder="Test code" required>
+            <button class="btn secondary" type="submit">Add</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <div class="two">
+      <section class="card" aria-labelledby="create-h">
+        <h2 id="create-h">Create a deal</h2>
+        <form id="create-form">
+          <label for="deal-type">Deal type</label>
+          <select id="deal-type" name="type" required></select>
+          <label for="deal-role">My role</label>
+          <select id="deal-role" name="role" required>
+            <option value="buyer">Sender (I pay)</option>
+            <option value="seller">Receiver (I get paid)</option>
+          </select>
+          <label for="deal-title">What is the deal for?</label>
+          <input id="deal-title" name="title" required maxlength="100">
+          <label for="deal-description">Details (optional)</label>
+          <textarea id="deal-description" name="description" maxlength="500"></textarea>
+          <label for="deal-amount">Amount (credits)</label>
+          <input id="deal-amount" name="amount" type="number" min="1" max="10000" step="1" required>
+          <label for="deal-deadline">Refund deadline (hours after funding)</label>
+          <input id="deal-deadline" name="deadline" type="number" min="1" max="720" step="1" value="72" required>
+          <button class="btn" type="submit">Create deal</button>
+        </form>
+      </section>
+
+      <div>
+        <section class="card" id="join-card" aria-labelledby="join-h">
+          <h2 id="join-h">Join a deal</h2>
+          <form id="join-form">
+            <label for="join-code">Invite code</label>
+            <input id="join-code" name="code" autocomplete="off" placeholder="ABCD-2345" required>
+            <button class="btn" type="submit">Join deal</button>
+          </form>
+        </section>
+        <section class="card" aria-labelledby="deals-h">
+          <h2 id="deals-h">My deals</h2>
+          <ul class="deal-list" id="deals"><li class="muted">Loading...</li></ul>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
