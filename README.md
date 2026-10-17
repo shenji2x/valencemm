@@ -12,6 +12,7 @@ Live at https://valencemm.com
 npm install
 npm start        # http://localhost:8080
 npm test         # runs the deal logic tests and the API tests
+npm run demo     # with the server running: plays out one full deal and prints each step
 ```
 
 ## Layout

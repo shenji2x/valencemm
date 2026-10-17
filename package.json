@@ -4,7 +4,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "demo": "node scripts/demo.js"
   },
   "dependencies": {
     "express": "^4.21.0"
