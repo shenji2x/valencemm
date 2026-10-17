@@ -1,0 +1,3 @@
+steps:
+- name: 'gcr.io/buildpacks/builder'
+  args: ['build', '--builder=gcr.io/buildpacks/builder', '--path=.', '--env=GOOGLE_RUNTIME=nodejs']
