@@ -12,7 +12,20 @@ const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
   ".txt": "text/plain; charset=utf-8",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".xml": "application/xml; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
 };
+const LONG_CACHE = new Set([".png", ".ico", ".svg"]); // images rarely change
+
+// Extra domains that should land on the main one. A permanent redirect keeps search
+// engines from seeing duplicate copies of the site, so everything ranks under one name.
+const CANONICAL_HOST = process.env.CANONICAL_HOST || "valencemm.com";
+const REDIRECT_HOSTS = new Set(
+  (process.env.REDIRECT_HOSTS || "www.valencemm.com,ai-mm.org,www.ai-mm.org")
+    .split(",").map((h) => h.trim().toLowerCase()).filter(Boolean)
+);
 
 // Reads everything in public/ once at startup. index.html is served at "/", and
 // other pages without their extension (docs.html -> /docs).
@@ -24,7 +37,7 @@ function loadStatic() {
     if (!type) continue;
     const body = fs.readFileSync(path.join(PUBLIC_DIR, name));
     const urlPath = name === "index.html" ? "/" : ext === ".html" ? "/" + name.slice(0, -5) : "/" + name;
-    files.set(urlPath, { body, type });
+    files.set(urlPath, { body, type, cache: LONG_CACHE.has(ext) ? "public, max-age=86400" : "no-cache" });
   }
   return files;
 }
@@ -35,7 +48,7 @@ const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "Strict-Transport-Security": "max-age=15552000",
   "Content-Security-Policy":
-    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; " +
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; " +
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
@@ -60,6 +73,15 @@ function createApp(opts = {}) {
 
   async function handle(req, res) {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+
+    // ai-mm.org, www.* etc. -> https://valencemm.com, keeping the path. 308 keeps POST as POST for API callers.
+    const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
+    if (REDIRECT_HOSTS.has(host)) {
+      const target = "https://" + CANONICAL_HOST + (String(req.url || "/").startsWith("/") ? req.url : "/");
+      res.writeHead(308, { Location: target, "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "public, max-age=3600" });
+      return res.end("Moved to " + target);
+    }
+
     let pathname;
     try {
       pathname = new URL(req.url, "http://localhost").pathname;
@@ -92,7 +114,7 @@ function createApp(opts = {}) {
     }
     const file = statics.get(pathname);
     if (!file) return sendError(res, { status: 404, code: "not_found", message: "Not found" }, false);
-    res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, "Cache-Control": "no-cache" });
+    res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, "Cache-Control": file.cache });
     res.end(req.method === "HEAD" ? undefined : file.body);
   }
 

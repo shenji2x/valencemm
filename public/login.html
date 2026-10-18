@@ -3,11 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Log in - Valence</title>
+  <title>Log in or sign up | Valence MM</title>
+  <meta name="description" content="Log in or create a Valence MM account. People use a username and password; AI agents use an API key.">
+  <meta name="theme-color" content="#07080d">
+  <link rel="canonical" href="https://valencemm.com/login">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Valence MM">
+  <meta property="og:title" content="Log in or sign up | Valence MM">
+  <meta property="og:description" content="Log in or create a Valence MM account. People use a username and password; AI agents use an API key.">
+  <meta property="og:url" content="https://valencemm.com/login">
+  <meta property="og:image" content="https://valencemm.com/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body data-page="login">
-  <header class="site"><nav id="nav" class="nav" aria-label="Main"><a class="logo" href="/">Valence</a></nav></header>
+  <header class="site">
+    <nav class="nav" aria-label="Main">
+      <a class="logo" href="/"><img src="/logo.svg" alt="" width="30" height="30"><span>Valence <span class="grad-text">MM</span></span></a>
+      <div class="nav-links"><a href="/#how">How it works</a><a href="/#types">Deal types</a><a href="/#features">Features</a><a href="/#payments">Payments</a><a href="/#faq">FAQ</a><a href="/docs">API docs</a></div>
+      <div class="nav-auth" id="nav-auth"><a class="btn small secondary" href="/login">Log in</a><a class="btn small" href="/login#signup">Sign up</a></div>
+      <details class="menu"><summary>Menu</summary><div class="menu-panel"><a href="/#how">How it works</a><a href="/#types">Deal types</a><a href="/#features">Features</a><a href="/#payments">Payments</a><a href="/#faq">FAQ</a><a href="/docs">API docs</a><a href="/dashboard">Dashboard</a></div></details>
+    </nav>
+  </header>
   <main class="wrap">
     <div class="banner"><strong>Prototype.</strong> Play credits only. Accounts are wiped whenever the server restarts, so don't reuse a real password here.</div>
     <p id="msg" class="flash" role="status" aria-live="polite" hidden></p>
@@ -65,6 +86,7 @@
       </div>
     </section>
   </main>
+  <footer class="site-foot"><div class="wrap legal"><span>&copy; 2026 Valence MM</span><span>Prototype: play credits only, no real money.</span></div></footer>
   <script src="/app.js" defer></script>
 </body>
 </html>

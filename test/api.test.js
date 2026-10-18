@@ -240,3 +240,52 @@ test("an agent can hold at most 20 unfinished deals", () => withServer(async (ct
   }
   assert.equal((await ctx.call("POST", "/v1/deals", { key: a.apiKey, body: { title: "one too many", amount: 1 } })).status, 429);
 }));
+
+test("extra domains redirect to valencemm.com, keeping the path and method", () => withServer(async (ctx) => {
+  // fetch() refuses to set a custom Host header, so use the low-level http module.
+  const http = require("http");
+  const port = ctx.server.address().port;
+  const hit = (host, path = "/", method = "GET") => new Promise((resolve, reject) => {
+    const req = http.request({ host: "127.0.0.1", port, path, method, headers: { Host: host } }, (res) => {
+      res.resume();
+      res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location }));
+    });
+    req.on("error", reject);
+    req.end(method === "POST" ? "{}" : undefined);
+  });
+  for (const host of ["ai-mm.org", "www.ai-mm.org", "WWW.AI-MM.ORG:443", "www.valencemm.com"]) {
+    const r = await hit(host, "/docs?x=1");
+    assert.equal(r.status, 308, host);
+    assert.equal(r.location, "https://valencemm.com/docs?x=1", host);
+  }
+  assert.equal((await hit("ai-mm.org", "/v1/agents/register", "POST")).status, 308);
+  // the main domain, the Cloud Run URL and lookalike names are served normally
+  for (const host of ["valencemm.com", "valencemm-208222471840.us-central1.run.app", "evil-ai-mm.org", "ai-mm.org.evil.com"]) {
+    assert.equal((await hit(host)).status, 200, host);
+  }
+}));
+
+test("logo, icons, manifest and SEO files are served with the right types", () => withServer(async (ctx) => {
+  const want = {
+    "/favicon.ico": /image\/x-icon/, "/favicon.svg": /image\/svg\+xml/, "/logo.svg": /image\/svg\+xml/,
+    "/apple-touch-icon.png": /image\/png/, "/icon-192.png": /image\/png/, "/icon-512.png": /image\/png/, "/og-image.png": /image\/png/,
+    "/site.webmanifest": /application\/manifest\+json/, "/robots.txt": /text\/plain/, "/sitemap.xml": /application\/xml/, "/llms.txt": /text\/plain/,
+  };
+  for (const [path, type] of Object.entries(want)) {
+    const r = await ctx.call("GET", path);
+    assert.equal(r.status, 200, path);
+    assert.match(r.headers.get("content-type"), type, path);
+  }
+  const png = await fetch(`http://127.0.0.1:${ctx.server.address().port}/og-image.png`);
+  const bytes = Buffer.from(await png.arrayBuffer());
+  assert.equal(bytes.subarray(1, 4).toString(), "PNG");
+  assert.match(png.headers.get("cache-control"), /max-age=86400/);
+  assert.match((await ctx.call("GET", "/robots.txt")).text, /Sitemap: https:\/\/valencemm\.com\/sitemap\.xml/);
+  assert.equal(JSON.parse((await ctx.call("GET", "/site.webmanifest")).text).name, "Valence MM");
+  const home = (await ctx.call("GET", "/")).text;
+  for (const tag of ['rel="icon"', 'rel="canonical" href="https://valencemm.com/"', 'property="og:image" content="https://valencemm.com/og-image.png"', 'name="twitter:card"', 'rel="manifest"']) {
+    assert.ok(home.includes(tag), "home page missing " + tag);
+  }
+  assert.ok((await ctx.call("GET", "/dashboard")).text.includes('name="robots" content="noindex"'));
+  assert.match((await ctx.call("GET", "/")).headers.get("content-security-policy"), /manifest-src 'self'/);
+}));

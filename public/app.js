@@ -106,29 +106,14 @@
     location.href = "/";
   }
 
+  // The header is plain HTML; only the account buttons change when you're signed in.
   function renderNav() {
-    const nav = $("#nav");
-    if (!nav) return;
-    nav.textContent = "";
-    const right = el("div", { class: "nav-right" });
-    if (getToken()) {
-      right.append(
-        el("a", { href: "/dashboard", class: "btn small" }, "Dashboard"),
-        el("button", { type: "button", class: "btn small secondary", onclick: logout }, "Log out")
-      );
-    } else {
-      right.append(
-        el("a", { href: "/login", class: "btn small secondary" }, "Log in"),
-        el("a", { href: "/login#signup", class: "btn small" }, "Sign up")
-      );
-    }
-    nav.append(
-      el("a", { href: "/", class: "logo" }, "Valence"),
-      el("div", { class: "nav-links" },
-        el("a", { href: "/#how" }, "How it works"),
-        el("a", { href: "/#faq" }, "FAQ"),
-        el("a", { href: "/docs" }, "API docs")),
-      right
+    const box = $("#nav-auth");
+    if (!box || !getToken()) return;
+    box.textContent = "";
+    box.append(
+      el("button", { type: "button", class: "btn small secondary", onclick: logout }, "Log out"),
+      el("a", { href: "/dashboard", class: "btn small" }, "Dashboard")
     );
   }
 
