@@ -23,6 +23,11 @@ const DEAL_TYPES = ["ai-ai", "ai-human", "human-human"];
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
 const OPEN_STATES = new Set(["open", "joined", "funded"]);
 const SNAPSHOT_SCHEMA = 1;
+const TICKET_CATEGORIES = ["deal", "account", "payments", "bug", "other"];
+const MAX_TICKETS = 20000;
+const MAX_OPEN_TICKETS_PER_ACCOUNT = 5;
+const MAX_TICKET_MESSAGES = 300;
+const DAY_MS = 24 * 3600 * 1000;
 
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const sha256Buf = (s) => crypto.createHash("sha256").update(s).digest();
@@ -65,6 +70,8 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
   const deals = new Map(); // dealId -> deal
   const dealsByInvite = new Map(); // inviteCode -> dealId
   const ledger = []; // append-only
+  const tickets = new Map(); // ticketId -> support ticket
+  let ticketSeq = 0; // human-friendly ticket numbers (#1, #2, ...)
   const platform = { balance: 0 };
   let minted = 0; // every credit ever created (welcome grants + test codes)
   const dummySalt = crypto.randomBytes(16); // used to keep login timing similar for unknown usernames
@@ -145,6 +152,39 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       throw new ApiError(404, "deal_not_found", "Deal not found");
     }
     return deal;
+  }
+
+  function ticketView(t) {
+    return {
+      id: t.id,
+      number: t.number,
+      category: t.category,
+      subject: t.subject,
+      dealId: t.dealId || null,
+      status: t.status,
+      createdAt: new Date(t.createdAt).toISOString(),
+      updatedAt: new Date(t.updatedAt).toISOString(),
+      messages: t.messages.map((m) => ({ id: m.id, from: m.from, author: m.author, text: m.text, at: new Date(m.at).toISOString() })),
+    };
+  }
+
+  function mustGetTicket(account, ticketId) {
+    const t = tickets.get(ticketId);
+    if (!t || t.accountId !== account.id) throw new ApiError(404, "ticket_not_found", "Ticket not found");
+    return t;
+  }
+
+  function pushTicketMessage(t, from, author, text, extra = {}) {
+    const msg = { id: t.messages.length + 1, from, author, text, at: now(), ...extra };
+    t.messages.push(msg);
+    if (t.messages.length > MAX_TICKET_MESSAGES) t.messages.splice(0, t.messages.length - MAX_TICKET_MESSAGES);
+    t.updatedAt = msg.at;
+    return msg;
+  }
+
+  function releasedAt(deal) {
+    for (let i = deal.history.length - 1; i >= 0; i--) if (deal.history[i].state === "released") return deal.history[i].at;
+    return null;
   }
 
   function checkCapacity() {
@@ -373,6 +413,186 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       return view(deal, account.id);
     },
 
+    // ---- people: change password ----
+    async changePassword(account, currentToken, currentPassword, newPassword) {
+      if (account.kind !== "human") throw new ApiError(403, "wrong_account_type", "AI agents use API keys, not passwords");
+      if (typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128) {
+        throw new ApiError(400, "invalid_password", "New password must be 8-128 characters");
+      }
+      if (typeof currentPassword !== "string" || currentPassword.length > 128) throw new ApiError(401, "invalid_login", "Current password is wrong");
+      const check = await scrypt(currentPassword, account.salt, 64);
+      if (!crypto.timingSafeEqual(check, account.hash)) throw new ApiError(401, "invalid_login", "Current password is wrong");
+      const salt = crypto.randomBytes(16);
+      account.hash = await scrypt(newPassword, salt, 64);
+      account.salt = salt;
+      // sign out every other browser; keep this one
+      const keep = typeof currentToken === "string" ? sha256(currentToken) : null;
+      for (const [h, s] of sessions) if (s.accountId === account.id && h !== keep) sessions.delete(h);
+      return { ok: true };
+    },
+
+    // ---- deals: look before you join ----
+    invitePreview(account, rawCode) {
+      const code = typeof rawCode === "string" ? rawCode.trim().toUpperCase() : "";
+      const deal = deals.get(dealsByInvite.get(code));
+      if (!deal) throw new ApiError(404, "invalid_invite", "Invite code not found or already used");
+      const creator = party(deal.creatorId);
+      let canJoin = true;
+      let reason = null;
+      if (deal.creatorId === account.id) { canJoin = false; reason = "This is your own deal."; }
+      else if (account.kind !== deal.joinKind) { canJoin = false; reason = `This deal is for ${deal.joinKind === "agent" ? "an AI agent" : "a person"} to join.`; }
+      return {
+        inviteCode: code,
+        type: deal.type,
+        title: deal.title,
+        description: deal.description,
+        amount: deal.amount,
+        feeBps: FEE_BPS,
+        deadlineHours: deal.deadlineHours,
+        creator,
+        creatorRole: deal.buyerId === deal.creatorId ? "buyer" : "seller",
+        yourRole: deal.buyerId === null ? "buyer" : "seller",
+        canJoin,
+        reason,
+      };
+    },
+
+    // ---- stats for the dashboard ----
+    stats(account, { days = 30 } = {}) {
+      const mine = [...deals.values()].filter((d) => d.buyerId === account.id || d.sellerId === account.id);
+      const counts = { open: 0, joined: 0, funded: 0, released: 0, refunded: 0, cancelled: 0 };
+      let sent = 0, received = 0, feesPaid = 0, inEscrow = 0;
+      const toRelease = []; // ms from creation to release
+      const fundedToRelease = []; // ms from funding to release
+      const start = now() - (days - 1) * DAY_MS;
+      const dayKey = (t) => new Date(t).toISOString().slice(0, 10);
+      const series = new Map();
+      for (let i = 0; i < days; i++) series.set(dayKey(start + i * DAY_MS), { date: dayKey(start + i * DAY_MS), volume: 0, deals: 0 });
+      for (const d of mine) {
+        counts[d.state]++;
+        if (d.state === "funded") inEscrow += d.amount;
+        if (d.state !== "released") continue;
+        const fee = Math.floor((d.amount * FEE_BPS) / 10000);
+        if (d.buyerId === account.id) sent += d.amount;
+        else { received += d.amount - fee; feesPaid += fee; }
+        const at = releasedAt(d);
+        if (at) {
+          toRelease.push(at - d.createdAt);
+          if (d.fundedAt) fundedToRelease.push(at - d.fundedAt);
+          const bucket = series.get(dayKey(at));
+          if (bucket) { bucket.volume += d.amount; bucket.deals += 1; }
+        }
+      }
+      const avg = (xs) => (xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
+      const median = (xs) => {
+        if (!xs.length) return null;
+        const s = [...xs].sort((a, b) => a - b);
+        const m = Math.floor(s.length / 2);
+        return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+      };
+      const finished = counts.released + counts.refunded + counts.cancelled;
+      return {
+        currency: "play-credits",
+        totalDeals: mine.length,
+        counts,
+        active: counts.open + counts.joined + counts.funded,
+        volume: { total: sent + received + feesPaid, sent, received, feesPaid, inEscrow },
+        completionRate: finished ? counts.released / finished : null,
+        durationMs: {
+          avgCreatedToReleased: avg(toRelease),
+          medianCreatedToReleased: median(toRelease),
+          avgFundedToReleased: avg(fundedToRelease),
+          fastest: toRelease.length ? Math.min(...toRelease) : null,
+        },
+        daily: [...series.values()],
+      };
+    },
+
+    // ---- support tickets ----
+    createTicket(account, input) {
+      const category = input.category == null ? "other" : input.category;
+      if (!TICKET_CATEGORIES.includes(category)) throw new ApiError(400, "invalid_category", `category must be one of: ${TICKET_CATEGORIES.join(", ")}`);
+      const subject = cleanText(input.subject, "subject", { min: 3, max: 100 });
+      const message = cleanText(input.message, "message", { min: 5, max: 2000 });
+      const dealId = input.dealId == null || input.dealId === "" ? null : cleanText(input.dealId, "dealId", { max: 40 });
+      if (tickets.size >= MAX_TICKETS) throw new ApiError(503, "capacity", "Support is full right now, try the Discord server");
+      let open = 0;
+      for (const t of tickets.values()) if (t.accountId === account.id && t.status === "open") open++;
+      if (open >= MAX_OPEN_TICKETS_PER_ACCOUNT) {
+        throw new ApiError(429, "too_many_tickets", `You can have at most ${MAX_OPEN_TICKETS_PER_ACCOUNT} open tickets. Close one first.`);
+      }
+      const t = {
+        id: randomId("tkt"), number: ++ticketSeq, accountId: account.id, category, subject, dealId,
+        status: "open", createdAt: now(), updatedAt: now(), messages: [], discord: null,
+      };
+      pushTicketMessage(t, "user", account.name, message);
+      tickets.set(t.id, t);
+      return ticketView(t);
+    },
+
+    listTickets(account) {
+      return [...tickets.values()]
+        .filter((t) => t.accountId === account.id)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map((t) => {
+          const v = ticketView(t);
+          const last = v.messages[v.messages.length - 1];
+          delete v.messages;
+          v.lastMessage = last ? { from: last.from, text: last.text.slice(0, 140), at: last.at } : null;
+          return v;
+        });
+    },
+
+    getTicket(account, ticketId) {
+      return ticketView(mustGetTicket(account, ticketId));
+    },
+
+    addTicketMessage(account, ticketId, rawText) {
+      const t = mustGetTicket(account, ticketId);
+      if (t.status !== "open") throw new ApiError(409, "ticket_closed", "This ticket is closed. Open a new one if you still need help.");
+      const text = cleanText(rawText, "message", { min: 1, max: 2000 });
+      const msg = pushTicketMessage(t, "user", account.name, text);
+      return { ticket: ticketView(t), message: { id: msg.id, text: msg.text } };
+    },
+
+    closeTicket(account, ticketId) {
+      const t = mustGetTicket(account, ticketId);
+      if (t.status === "open") {
+        t.status = "closed";
+        pushTicketMessage(t, "system", "Valence", "You closed this ticket.");
+      }
+      return ticketView(t);
+    },
+
+    // Used by the Discord relay only (no account checks: the caller already holds the ticket).
+    ticketForRelay(ticketId) {
+      return tickets.get(ticketId) || null;
+    },
+    ticketOwnerName(t) {
+      const a = accounts.get(t.accountId);
+      return a ? `${a.name} (${a.kind === "agent" ? "AI agent" : "person"})` : "unknown";
+    },
+    setTicketDiscord(t, patch) {
+      t.discord = { ...(t.discord || {}), ...patch };
+    },
+    addStaffMessages(t, msgs) {
+      let added = 0;
+      for (const m of msgs) {
+        if (m.text.trim().toLowerCase() === "!close") {
+          if (t.status === "open") {
+            t.status = "closed";
+            pushTicketMessage(t, "system", "Valence", "Support closed this ticket.");
+            added++;
+          }
+          continue;
+        }
+        if (t.status !== "open") continue;
+        pushTicketMessage(t, "staff", m.author || "Support", m.text.slice(0, 4000));
+        added++;
+      }
+      return added;
+    },
+
     // Whole-store snapshot for durable storage (see persist.js). Lookup maps are rebuilt on import.
     exportState() {
       return {
@@ -388,6 +608,8 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
         sessions: [...sessions.entries()],
         deals: [...deals.values()],
         ledger,
+        tickets: [...tickets.values()],
+        ticketSeq,
       };
     },
 
@@ -409,6 +631,8 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
         if (d.state === "open") dealsByInvite.set(d.inviteCode, d.id); // invites are only live while a deal is open
       }
       ledger.push(...state.ledger);
+      for (const t of state.tickets || []) tickets.set(t.id, t); // older snapshots have no tickets
+      ticketSeq = state.ticketSeq || 0;
       platform.balance = state.platformBalance;
       minted = state.minted;
     },
@@ -425,4 +649,4 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
   };
 }
 
-module.exports = { createStore, parseTestCodes, STARTING_CREDITS, FEE_BPS, MAX_AMOUNT, DEAL_TYPES };
+module.exports = { createStore, parseTestCodes, STARTING_CREDITS, FEE_BPS, MAX_AMOUNT, DEAL_TYPES, TICKET_CATEGORIES };

@@ -9,6 +9,7 @@ server.ready.then(
       console.log(`Listening on ${port}`);
       console.log(`Storage: ${server.persistence.kind}${restored ? " (restored saved data)" : " (starting empty)"}`);
       if (server.persistence.kind === "memory") console.log("Data is NOT saved. Set STORAGE_BUCKET (Cloud Storage) or DATA_FILE (local file) to keep it.");
+      console.log(`Support relay: ${server.discord.mode}`);
       console.log(`Test credits: ${server.testCodesEnabled ? "enabled" : "off (set TEST_CREDIT_CODES to turn on)"}`);
       const audit = server.store.audit();
       console.log(`Ledger: ${audit.ok ? "balanced" : "UNBALANCED"} (${audit.accounts} accounts, ${audit.deals} deals)`);

@@ -60,6 +60,92 @@ function createApi(store, opts = {}) {
     }));
   }
 
+  // ---- people: password ----
+  add("POST", "/humans/password", { auth: true, limit: loginLimit }, async ({ account, token, body }) => ({
+    body: await store.changePassword(account, token, body.currentPassword, body.newPassword),
+  }));
+
+  // ---- deals: preview an invite before joining, and stats ----
+  add("GET", "/deals/invite/:code", { auth: true, limit: joinLimit }, ({ account, params }) => ({
+    body: store.invitePreview(account, params.code),
+  }));
+  add("GET", "/stats", { auth: true }, ({ account }) => ({ body: store.stats(account) }));
+
+  // ---- support tickets, relayed to Discord ----
+  const discord = opts.discord || { mode: "off", async open() { return null; }, async post() { return null; }, async markClosed() {}, async fetchReplies() { return null; } };
+  const ticketLimit = limiter({ windowMs: 3600 * 1000, max: opts.ticketLimit || 6, code: "ticket_rate_limited" });
+  const messageLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.messageLimit || 60, code: "message_rate_limited" });
+  const relayError = (what, err) => console.error(`Discord ${what} failed:`, err && err.message ? err.message : err);
+
+  async function relayOpen(t) {
+    try {
+      const d = await discord.open(t, store.ticketOwnerName(t));
+      if (d) store.setTicketDiscord(t, { ...d, error: null });
+    } catch (err) {
+      relayError("open", err);
+      store.setTicketDiscord(t, { error: "open_failed" });
+    }
+  }
+
+  async function relayPost(t, author, text, title) {
+    if (discord.mode === "off") return;
+    const opened = t.discord && (t.discord.channelId || t.discord.threadId || (discord.mode === "webhook" && !t.discord.error));
+    if (!opened) return relayOpen(t); // first attempt failed earlier: open now (posts the history's first message)
+    try {
+      await discord.post(t, author, text, title);
+    } catch (err) {
+      relayError("post", err);
+    }
+  }
+
+  // Pulls staff replies from Discord into the ticket, and saves if anything arrived.
+  async function syncTicket(t) {
+    if (t.status !== "open") return;
+    try {
+      const r = await discord.fetchReplies(t);
+      if (!r) return;
+      const added = store.addStaffMessages(t, r.messages);
+      const moved = r.lastMessageId && r.lastMessageId !== t.discord.lastMessageId;
+      if (moved) store.setTicketDiscord(t, { lastMessageId: r.lastMessageId });
+      if ((added || moved) && opts.persistence) await opts.persistence.commit();
+    } catch (err) {
+      relayError("sync", err);
+    }
+  }
+
+  add("GET", "/support", {}, () => ({
+    body: { discordInvite: opts.discordInvite || "https://discord.gg/eVYyxbyy22", liveReplies: discord.mode === "bot", relay: discord.mode },
+  }));
+  add("GET", "/tickets", { auth: true }, async ({ account }) => {
+    const open = store.listTickets(account).filter((t) => t.status === "open").slice(0, 5);
+    await Promise.all(open.map((v) => syncTicket(store.ticketForRelay(v.id))));
+    return { body: { tickets: store.listTickets(account), liveReplies: discord.mode === "bot" } };
+  });
+  add("POST", "/tickets", { auth: true, limit: ticketLimit }, async ({ account, body }) => {
+    const view = store.createTicket(account, body);
+    await relayOpen(store.ticketForRelay(view.id));
+    return { status: 201, body: store.getTicket(account, view.id) };
+  });
+  add("GET", "/tickets/:id", { auth: true }, async ({ account, params }) => {
+    store.getTicket(account, params.id); // 404 before touching Discord
+    await syncTicket(store.ticketForRelay(params.id));
+    return { body: store.getTicket(account, params.id) };
+  });
+  add("POST", "/tickets/:id/messages", { auth: true, limit: messageLimit }, async ({ account, params, body }) => {
+    const { ticket } = store.addTicketMessage(account, params.id, body.text);
+    const t = store.ticketForRelay(ticket.id);
+    await relayPost(t, store.ticketOwnerName(t), ticket.messages[ticket.messages.length - 1].text);
+    return { status: 201, body: store.getTicket(account, params.id) };
+  });
+  add("POST", "/tickets/:id/close", { auth: true }, async ({ account, params }) => {
+    const before = store.getTicket(account, params.id).status;
+    const view = store.closeTicket(account, params.id);
+    if (before === "open" && discord.mode !== "off") {
+      try { await discord.markClosed(store.ticketForRelay(view.id), "the customer"); } catch (err) { relayError("close", err); }
+    }
+    return { body: view };
+  });
+
   return async function handleApi(req, res, apiPath) {
     const ip = clientIp(req);
     globalLimit(ip);

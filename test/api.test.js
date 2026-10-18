@@ -203,7 +203,7 @@ test("rate limits: registration, login and joins", async () => {
 });
 
 test("pages, security headers and no leaked secrets", () => withServer(async (ctx) => {
-  for (const [path, needle] of [["/", "Create a deal"], ["/docs", "Idempotency-Key"], ["/login", "Don't have an account\\? <a href=\"/signup\""], ["/signup", "Already have an account\\? <a href=\"/login\""], ["/dashboard", "Create a deal"], ["/deal", "Loading"]]) {
+  for (const [path, needle] of [["/", "automated escrow"], ["/docs", "Idempotency-Key"], ["/login", "Don't have an account\\? <a href=\"/signup\""], ["/signup", "Already have an account\\? <a href=\"/login\""], ["/dashboard", "Active deals"], ["/deal", "Opening your deal"]]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
     assert.match(r.text, new RegExp(needle), path);
@@ -225,7 +225,7 @@ test("pages, security headers and no leaked secrets", () => withServer(async (ct
   assert.equal((await ctx.call("POST", "/docs", { body: {} })).status, 405);
   assert.equal(home.headers.get("x-powered-by"), null);
   // no inline scripts or styles anywhere, which is what the CSP relies on
-  for (const p of ["/", "/docs", "/login", "/signup", "/dashboard", "/deal"]) {
+  for (const p of ["/", "/docs", "/login", "/signup", "/dashboard"]) {
     const t0 = (await ctx.call("GET", p)).text;
     assert.ok(t0.includes('id="theme-toggle"'), p + " is missing the theme toggle");
     assert.ok(t0.indexOf('src="/theme.js"') < t0.indexOf("</head>"), p + " must load theme.js in <head>");
@@ -301,7 +301,7 @@ test("vendored GSAP, Lenis and self-hosted fonts are served from our own origin"
     assert.equal(r.status, 200, path);
     assert.match(r.headers.get("content-type"), /javascript/, path);
   }
-  for (const path of ["/fonts/bricolage-grotesque.woff", "/fonts/hanken-grotesk.woff", "/fonts/ibm-plex-mono-400.woff"]) {
+  for (const path of ["/fonts/inter-400.woff", "/fonts/inter-display-700.woff", "/fonts/ibm-plex-mono-400.woff"]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
     assert.match(r.headers.get("content-type"), /font\/woff/, path);

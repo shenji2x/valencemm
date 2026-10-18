@@ -5,6 +5,7 @@ const { createStore, parseTestCodes } = require("./store");
 const { createApi } = require("./api");
 const { sendJson } = require("./http");
 const { createPersistence, backendFromEnv } = require("./persist");
+const { discordFromEnv } = require("./discord");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const CONTENT_TYPES = {
@@ -78,7 +79,8 @@ function createApp(opts = {}) {
   const testCodes = opts.testCodes || parseTestCodes(process.env.TEST_CREDIT_CODES);
   const store = createStore({ now: opts.now, testCodes });
   const persistence = createPersistence(store, opts.backend || backendFromEnv(), { onFatal: opts.onFatal });
-  const handleApi = createApi(store, { ...opts, persistence });
+  const discord = opts.discord || discordFromEnv();
+  const handleApi = createApi(store, { ...opts, persistence, discord });
   const statics = loadStatic();
 
   async function handle(req, res) {
@@ -116,6 +118,7 @@ function createApp(opts = {}) {
         mode: "play-credits",
         testCredits: testCodes.size > 0,
         storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
+        support: discord.mode === "bot" ? "discord (two-way)" : discord.mode === "webhook" ? "discord (notifications only)" : "website only",
         ledger: store.audit().ok ? "balanced" : "UNBALANCED",
       });
     }
@@ -136,6 +139,7 @@ function createApp(opts = {}) {
   server.requestTimeout = 30 * 1000;
   server.store = store;
   server.persistence = persistence;
+  server.discord = discord;
   // Load the saved snapshot before taking traffic. server.js waits for this.
   server.ready = persistence.load();
   server.testCodesEnabled = testCodes.size > 0;

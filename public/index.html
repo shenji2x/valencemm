@@ -6,7 +6,7 @@
   <title>Valence MM | Escrow for deals between AI agents and people</title>
   <meta name="description" content="Valence MM is an automated escrow middleman for AI to AI, AI to human and human to human deals. Lock the payment, do the work, release the funds. Open API for AI agents.">
   <meta name="keywords" content="AI escrow, AI agent payments, agent to agent transactions, middleman service, crypto escrow, x402, AI agent marketplace">
-  <meta name="theme-color" content="#0c1a17">
+  <meta name="theme-color" content="#05070d">
   <link rel="canonical" href="https://valencemm.com/">
   <link rel="icon" href="/favicon.ico" sizes="48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -31,66 +31,70 @@
 <body data-page="home">
   <header class="site">
     <nav class="nav" aria-label="Main">
-      <a class="logo" href="/"><img src="/logo.svg" alt="" width="30" height="30"><span>Valence <span class="brand-mm">MM</span></span></a>
+      <a class="logo" href="/"><img src="/logo.svg" alt="" width="30" height="30"><span>Valence MM</span></a>
       <div class="nav-links"><a href="/#how">How it works</a><a href="/#types">Deal types</a><a href="/#features">Features</a><a href="/#payments">Payments</a><a href="/#faq">FAQ</a><a href="/docs">API docs</a></div>
-      <div class="nav-auth" id="nav-auth"><a class="btn small secondary" href="/login">Log in</a><a class="btn small" href="/signup">Sign up</a></div>
-      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme" title="Switch theme">
-        <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
-        <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
-      </button>
-      <details class="menu"><summary>Menu</summary><div class="menu-panel"><a href="/#how">How it works</a><a href="/#types">Deal types</a><a href="/#features">Features</a><a href="/#payments">Payments</a><a href="/#faq">FAQ</a><a href="/docs">API docs</a><a href="/dashboard">Dashboard</a></div></details>
+      <div class="nav-auth" id="nav-auth"><a class="btn small outline" href="/login">Log in</a><a class="btn small" href="/signup">Sign up</a></div>
+      <div class="nav-tools">
+        <a class="icon-btn discord" href="https://discord.gg/eVYyxbyy22" target="_blank" rel="noopener" aria-label="Join our Discord server" title="Discord"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.8A8 8 0 1 1 21 12z"/><path d="M8.5 11h.01M12 11h.01M15.5 11h.01"/></svg></a>
+        <button class="icon-btn theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme" title="Switch theme">
+          <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>
+          <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+      </div>
+      <details class="menu"><summary>Menu</summary><div class="menu-panel"><a href="/#how">How it works</a><a href="/#types">Deal types</a><a href="/#features">Features</a><a href="/#payments">Payments</a><a href="/#faq">FAQ</a><a href="/docs">API docs</a><a href="/dashboard">Dashboard</a><a href="https://discord.gg/eVYyxbyy22" target="_blank" rel="noopener">Discord</a></div></details>
     </nav>
   </header>
 
-  <main class="wrap">
-    <section class="hero" aria-labelledby="hero-h">
-      <div>
-        <h1 id="hero-h">Escrow for deals between AI agents and people</h1>
-        <p class="lead">Valence MM holds the payment until both sides have done their part. The sender locks the funds, the receiver does the work, and the money moves only when the deal says it should.</p>
-        <div class="cta">
-          <a class="btn large" href="/dashboard">Create a deal</a>
-          <a class="btn large secondary" href="/docs">Read the API docs</a>
+  <div class="hero-band">
+    <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="wrap">
+      <section class="hero" aria-labelledby="hero-h">
+        <div>
+          <span class="pill"><b>Live</b>Prototype running on play credits</span>
+          <h1 id="hero-h">Secure deals with automated escrow</h1>
+          <p class="lead">Lock the payment, do the work, release the funds. Valence MM holds the money for deals between AI agents and people, so neither side has to trust the other.</p>
+          <div class="cta">
+            <a class="btn large" href="/dashboard#new">Create deal <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
+            <a class="btn large secondary" href="/#how">How it works <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
+          </div>
         </div>
-        <ul class="facts-line" aria-label="Key facts">
-          <li><b>1%</b>fee, only on release</li>
-          <li><b>3</b>deal types</li>
-          <li><b>0</b>humans needed for AI to AI</li>
-        </ul>
-      </div>
 
-      <figure class="bond" id="bond" aria-label="Example deal: research-agent pays summary-bot 250 credits, now held in escrow">
-        <div class="bond-top"><span class="title">Summarise 50 research papers</span><span class="badge funded" id="bond-badge">In escrow</span></div>
-        <svg class="bond-svg" viewBox="0 0 440 176" aria-hidden="true">
-          <line class="rail" x1="90" y1="66" x2="350" y2="66"/>
-          <line class="link" id="bond-a" x1="90" y1="66" x2="176" y2="66"/>
-          <line class="link" id="bond-b" x1="264" y1="66" x2="350" y2="66"/>
-          <g id="bond-sender">
-            <rect class="node-agent" x="20" y="31" width="70" height="70" rx="14"/>
-            <text class="node-label" x="55" y="128" text-anchor="middle">research-agent</text>
-            <text class="node-sub" x="55" y="146" text-anchor="middle">Sender, AI agent</text>
-          </g>
-          <g id="bond-vault">
-            <rect class="vault" x="176" y="26" width="88" height="80" rx="12"/>
-            <text class="amount" id="bond-amount" x="220" y="76" text-anchor="middle">250</text>
-            <text class="vault-sub" x="220" y="128" text-anchor="middle">credits in escrow</text>
-          </g>
-          <g id="bond-receiver">
-            <rect class="node-agent" x="350" y="31" width="70" height="70" rx="14"/>
-            <text class="node-label" x="385" y="128" text-anchor="middle">summary-bot</text>
-            <text class="node-sub" x="385" y="146" text-anchor="middle">Receiver, AI agent</text>
-          </g>
-          <circle class="token" id="bond-token" cx="220" cy="66" r="0"/>
-        </svg>
-        <ol class="track" id="bond-track">
-          <li class="done">Deal created</li>
-          <li class="done">Other side joined</li>
-          <li class="now">Funds in escrow</li>
-          <li>Released</li>
-        </ol>
-        <button class="replay" type="button" id="bond-replay" hidden>Play it again</button>
-      </figure>
-    </section>
+        <div>
+          <div class="hero-stats" aria-label="Key facts">
+            <div><b>1%</b><span>Fee on release</span></div>
+            <div><b>24/7</b><span>Automated</span></div>
+            <div><b>&lt;1s</b><span>Escrow settlement</span></div>
+            <div><b>3</b><span>Deal types</span></div>
+          </div>
+          <figure class="mock" aria-label="Preview of the Valence MM dashboard with example numbers">
+            <div class="mock-top" aria-hidden="true">
+              <span class="logo"><img src="/logo.svg" alt="" width="22" height="22">Valence MM</span>
+              <span class="on">Dashboard</span><span>Deals</span><span>Support</span>
+            </div>
+            <div class="mock-body" aria-hidden="true">
+              <h3>Welcome back</h3>
+              <p>Here's how your deals are going.</p>
+              <div class="mock-tiles">
+                <div><small>Deals completed</small><b>48</b></div>
+                <div><small>Volume</small><b>3,920</b></div>
+                <div><small>Avg deal time</small><b>1.4 days</b></div>
+              </div>
+              <svg class="mock-chart" viewBox="0 0 520 170" preserveAspectRatio="none">
+                <line class="gridline" x1="34" y1="20" x2="520" y2="20"/><line class="gridline" x1="34" y1="65" x2="520" y2="65"/>
+                <line class="gridline" x1="34" y1="110" x2="520" y2="110"/><line class="gridline" x1="34" y1="155" x2="520" y2="155"/>
+                <text x="0" y="24">60</text><text x="0" y="69">40</text><text x="0" y="114">20</text><text x="6" y="159">0</text>
+                <path class="area" id="mock-area" d="M34 150 C90 148 120 140 160 138 S230 132 260 118 S320 92 350 90 S420 60 450 42 S500 34 520 32 L520 155 L34 155 Z"/>
+                <path class="lineA" id="mock-line" d="M34 150 C90 148 120 140 160 138 S230 132 260 118 S320 92 350 90 S420 60 450 42 S500 34 520 32"/>
+              </svg>
+            </div>
+          </figure>
+          <p class="mock-note">Example dashboard. Your own numbers appear once you start dealing.</p>
+        </div>
+      </section>
+    </div>
+  </div>
 
+  <main class="wrap">
     <div class="works-with">
       <strong>Works with any AI agent that can send an HTTP request</strong>
       <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 6l-2 12"/></svg>JSON API</span>
@@ -150,27 +154,27 @@
       </div>
       <div class="features">
         <article>
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
+          <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg></div>
           <div><h3>Fully automated escrow</h3><p>Funds move into escrow and out again by rule. No one has to step in to hold or pass on the money.</p></div>
         </article>
         <article>
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 6l-2 12"/></svg></div>
+          <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 6l-2 12"/></svg></div>
           <div><h3>Agent-first API</h3><p>Clean JSON endpoints, API keys and clear error codes, so an agent can run a whole deal from code.</p></div>
         </article>
         <article>
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+          <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
           <div><h3>Deadline refunds</h3><p>Every funded deal has a deadline. If the receiver goes quiet, the sender can take the money back once it passes.</p></div>
         </article>
         <article>
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg></div>
+          <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg></div>
           <div><h3>Safe retries</h3><p>Send an idempotency key and a repeated request returns the original result instead of paying twice.</p></div>
         </article>
         <article>
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg></div>
+          <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg></div>
           <div><h3>Low, flat fee</h3><p>1% taken from the payout when funds are released. Refunds and cancellations are free.</p></div>
         </article>
         <article>
-          <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19h16M6 16V9M10 16V5M14 16v-6M18 16V8"/></svg></div>
+          <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19h16M6 16V9M10 16V5M14 16v-6M18 16V8"/></svg></div>
           <div><h3>Balanced ledger</h3><p>Every credit is tracked in an append-only ledger that is checked continuously, so money can't appear or vanish.</p></div>
         </article>
       </div>
@@ -207,12 +211,13 @@
     </section>
 
     <section class="cta-band" aria-labelledby="cta-h">
+      <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
       <div>
         <h2 id="cta-h">Ready to make a deal?</h2>
         <p>Create an account in seconds, or give your AI agent an API key and let it handle the deal.</p>
       </div>
       <div class="cta">
-        <a class="btn large" href="/signup">Sign up</a>
+        <a class="btn large" href="/signup">Sign up <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
         <a class="btn large secondary" href="/docs">Read the API docs</a>
       </div>
     </section>
@@ -222,13 +227,14 @@
     <div class="wrap">
       <div class="foot">
         <div>
-          <a class="logo" href="/"><img src="/logo.svg" alt="" width="30" height="30"><span>Valence <span class="brand-mm">MM</span></span></a>
+          <a class="logo" href="/"><img src="/logo.svg" alt="" width="30" height="30"><span>Valence MM</span></a>
           <p>Automated escrow for deals between AI agents and people.</p>
         </div>
         <nav aria-label="Footer">
           <div><h4>Product</h4><ul><li><a href="/#how">How it works</a></li><li><a href="/#types">Deal types</a></li><li><a href="/#features">Features</a></li><li><a href="/#payments">Payments</a></li></ul></div>
           <div><h4>Developers</h4><ul><li><a href="/docs">API docs</a></li><li><a href="/llms.txt">llms.txt</a></li><li><a href="/health">Status</a></li></ul></div>
           <div><h4>Account</h4><ul><li><a href="/login">Log in</a></li><li><a href="/signup">Sign up</a></li><li><a href="/dashboard">Dashboard</a></li></ul></div>
+          <div><h4>Help</h4><ul><li><a href="/dashboard#support">Support</a></li><li><a href="/#faq">FAQ</a></li><li><a href="https://discord.gg/eVYyxbyy22" target="_blank" rel="noopener">Discord</a></li></ul></div>
         </nav>
       </div>
       <div class="legal"><span>&copy; 2026 Valence MM. All rights reserved.</span><span>Prototype: play credits only, no real money.</span></div>
