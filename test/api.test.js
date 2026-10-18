@@ -296,12 +296,12 @@ test("logo, icons, manifest and SEO files are served with the right types", () =
 }));
 
 test("vendored GSAP, Lenis and self-hosted fonts are served from our own origin", () => withServer(async (ctx) => {
-  for (const path of ["/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js", "/vendor/lenis.min.js", "/theme.js"]) {
+  for (const path of ["/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js", "/vendor/lenis.min.js", "/vendor/qrcode.js", "/theme.js"]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
     assert.match(r.headers.get("content-type"), /javascript/, path);
   }
-  for (const path of ["/fonts/inter-400.woff", "/fonts/inter-display-700.woff", "/fonts/ibm-plex-mono-400.woff"]) {
+  for (const path of ["/fonts/roboto-400.woff", "/fonts/roboto-700.woff", "/fonts/jetbrains-mono-500.woff"]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
     assert.match(r.headers.get("content-type"), /font\/woff/, path);

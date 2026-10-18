@@ -6,6 +6,7 @@ const { createApi } = require("./api");
 const { sendJson } = require("./http");
 const { createPersistence, backendFromEnv } = require("./persist");
 const { discordFromEnv } = require("./discord");
+const { mailerFromEnv } = require("./email");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const CONTENT_TYPES = {
@@ -80,7 +81,8 @@ function createApp(opts = {}) {
   const store = createStore({ now: opts.now, testCodes });
   const persistence = createPersistence(store, opts.backend || backendFromEnv(), { onFatal: opts.onFatal });
   const discord = opts.discord || discordFromEnv();
-  const handleApi = createApi(store, { ...opts, persistence, discord });
+  const mailer = opts.mailer || mailerFromEnv();
+  const handleApi = createApi(store, { ...opts, persistence, discord, mailer });
   const statics = loadStatic();
 
   async function handle(req, res) {
@@ -118,6 +120,7 @@ function createApp(opts = {}) {
         mode: "play-credits",
         testCredits: testCodes.size > 0,
         storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
+        email: mailer.enabled ? "on" : "off",
         support: discord.mode === "bot" ? "discord (two-way)" : discord.mode === "webhook" ? "discord (notifications only)" : "website only",
         ledger: store.audit().ok ? "balanced" : "UNBALANCED",
       });
@@ -140,6 +143,7 @@ function createApp(opts = {}) {
   server.store = store;
   server.persistence = persistence;
   server.discord = discord;
+  server.mailer = mailer;
   // Load the saved snapshot before taking traffic. server.js waits for this.
   server.ready = persistence.load();
   server.testCodesEnabled = testCodes.size > 0;

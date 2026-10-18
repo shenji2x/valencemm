@@ -66,6 +66,10 @@
     out: "M7 17L17 7M8 7h9v9",
     back: "M15 18l-6-6 6-6",
     copy: "M9 9h11v11H9zM5 15H4V4h11v1",
+    phone: "M7 2h10a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM11 18h2",
+    mail: "M3 5h18v14H3zM3 6l9 7 9-7",
+    key: "M8 14a4 4 0 1 0 0-.01M11 12l9-9M17 6l3 3M15 8l2 2",
+    shield: "M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z",
   };
   function icon(name, cls = "ico") {
     return svg("svg", { class: cls, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" },
@@ -312,10 +316,74 @@
       $("#agent-continue").onclick = () => done(r.apiKey);
     });
   }
+
+  // Second step of signing in when two-factor is on.
+  const METHOD_LABELS = { app: "Authenticator", email: "Email code", recovery: "Recovery code" };
+  function twoFactorStep(r, done) {
+    const box = $(".auth");
+    let method = r.methods[0];
+    function draw() {
+      box.textContent = "";
+      const seg = el("div", { class: "seg", role: "group", "aria-label": "How do you want to verify?" });
+      for (const m of r.methods) {
+        put(seg, el("button", { type: "button", "aria-pressed": String(m === method), onclick: () => { method = m; draw(); } }, METHOD_LABELS[m]));
+      }
+      const input = el("input", {
+        id: "tfa-code", name: "code", required: true, autocomplete: "one-time-code", spellcheck: "false", class: "code-input",
+        inputmode: method === "recovery" ? "text" : "numeric", maxlength: method === "recovery" ? "12" : "6",
+        placeholder: method === "recovery" ? "xxxx-xxxx" : "123456",
+      });
+      const intro = {
+        app: "Open your authenticator app (like Google Authenticator) and enter the 6-digit code for Valence MM.",
+        email: `We'll email a 6-digit code to ${r.emailHint}.`,
+        recovery: "Enter one of the recovery codes you saved when you turned on two-step verification. Each code works once.",
+      }[method];
+      const form = el("form", {},
+        el("label", { for: "tfa-code" }, method === "recovery" ? "Recovery code" : "6-digit code"), input,
+        el("button", { type: "submit", class: "btn" }, "Verify and log in"));
+      bindForm(form, async () => {
+        const res = await api("POST", "/humans/login/verify", { challenge: r.challenge, method, code: input.value }, { noRedirect: true });
+        if (method === "recovery" && res.recoveryCodesLeft <= 3) {
+          try { sessionStorage.setItem("valence_notice", `You have ${res.recoveryCodesLeft} recovery codes left. Make new ones in Settings.`); } catch { /* ignore */ }
+        }
+        done(res.token);
+      });
+      let sendBtn = null;
+      if (method === "email") {
+        sendBtn = el("button", { type: "button", class: "btn secondary", onclick: async () => {
+          sendBtn.disabled = true;
+          flash("");
+          try {
+            const res = await api("POST", "/humans/login/email-code", { challenge: r.challenge }, { noRedirect: true });
+            flash(`Code sent to ${res.emailHint}. It expires in 10 minutes.`, "ok");
+            sendBtn.textContent = "Send a new code";
+            input.focus();
+          } catch (err) {
+            flash(err.message);
+          } finally {
+            setTimeout(() => { sendBtn.disabled = false; }, 30000);
+          }
+        } }, "Email me a code");
+      }
+      put(box,
+        el("h1", {}, "Two-step verification"),
+        el("p", { class: "sub" }, "Your password was right. One more step to keep your account safe."),
+        el("p", { id: "msg", class: "flash", role: "status", "aria-live": "polite", hidden: true }),
+        r.methods.length > 1 ? seg : null,
+        el("p", { class: "muted tfa-intro" }, intro),
+        sendBtn,
+        form,
+        el("p", { class: "switch" }, el("a", { href: location.pathname + location.search }, "Start over")));
+      if (method !== "email") setTimeout(() => input.focus(), 0);
+    }
+    draw();
+  }
+
   function loginPage() {
     const done = authDone();
     bindForm("#login-form", async (f) => {
       const r = await api("POST", "/humans/login", { username: val(f, "username"), password: val(f, "password") }, { noRedirect: true });
+      if (r.twoFactorRequired) return twoFactorStep(r, done);
       done(r.token);
     });
     bindForm("#agent-key-form", async (f) => {
@@ -431,6 +499,10 @@
     av.textContent = me.name.slice(0, 1);
     if (me.kind === "agent") av.classList.add("agent");
     $("#logout").addEventListener("click", logout);
+    try {
+      const n = sessionStorage.getItem("valence_notice");
+      if (n) { sessionStorage.removeItem("valence_notice"); setTimeout(() => toast(n), 600); }
+    } catch { /* ignore */ }
     $("#burger").addEventListener("click", () => {
       const open = $("#app").classList.toggle("nav-open");
       $("#burger").setAttribute("aria-expanded", String(open));
@@ -1119,6 +1191,212 @@
   }
 
   // ---------- settings ----------
+
+  // ---------- settings: email and two-step verification ----------
+  function qrSvg(text) {
+    if (typeof window.qrcode !== "function") return null;
+    const qr = window.qrcode(0, "M");
+    qr.addData(text);
+    qr.make();
+    const n = qr.getModuleCount();
+    const q = 4; // quiet zone
+    let d = "";
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + q} ${r + q}h1v1h-1z`;
+    return svg("svg", { class: "qr", viewBox: `0 0 ${n + q * 2} ${n + q * 2}`, role: "img", "aria-label": "QR code for your authenticator app", "shape-rendering": "crispEdges" },
+      svg("rect", { width: n + q * 2, height: n + q * 2, fill: "#fff" }), svg("path", { d, fill: "#000" }));
+  }
+
+  function recoveryPanel(codes) {
+    const text = codes.join("\n");
+    const download = el("button", { type: "button", class: "btn small secondary", onclick: () => {
+      const url = URL.createObjectURL(new Blob([`Valence MM recovery codes for ${app.me.name}\nEach code works once.\n\n${text}\n`], { type: "text/plain" }));
+      const a = el("a", { href: url, download: "valence-recovery-codes.txt" });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } }, "Download");
+    return el("div", { class: "next" },
+      el("h3", {}, "Save your recovery codes"),
+      el("p", {}, "If you lose your phone or can't get to your email, each of these codes lets you log in once. They won't be shown again."),
+      el("ul", { class: "codes" }, codes.map((c) => el("li", { class: "code" }, c))),
+      el("div", { class: "row" }, copyButton(text, "Copy all"), download));
+  }
+
+  // A small inline "enter your password to continue" form.
+  function passwordGate(label, run) {
+    const input = el("input", { type: "password", name: "password", autocomplete: "current-password", required: true, placeholder: "Your password", "aria-label": "Your password" });
+    const form = el("form", { class: "gate" }, el("div", { class: "row" }, input, el("button", { type: "submit", class: "btn small" }, label)));
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const b = form.querySelector("button");
+      b.disabled = true;
+      try { await run(input.value); } finally { b.disabled = false; }
+    });
+    setTimeout(() => input.focus(), 0);
+    return form;
+  }
+
+  function securitySection(gen) {
+    const wrap = el("div");
+    let s = null;
+    let showCodes = null; // recovery codes to show once after turning something on
+    let open = null; // which inline panel is open
+    let setup = null; // authenticator setup in progress
+    let editingEmail = false;
+
+    const note = el("p", { class: "flash", role: "status", "aria-live": "polite", hidden: true });
+    const say = (text, kind = "error") => { note.textContent = text || ""; note.className = "flash " + kind; note.hidden = !text; };
+    async function run(fn, okText) {
+      say("");
+      try {
+        const r = await fn();
+        if (r && r.recoveryCodes) showCodes = r.recoveryCodes;
+        if (r && r.twoFactor) s = { ...s, ...r };
+        open = null;
+        if (okText) say(okText, "ok");
+      } catch (err) {
+        say(err.message);
+      }
+      draw();
+    }
+    const badge = (on, onText = "On", offText = "Off") => el("span", { class: "badge " + (on ? "ok" : "closed") }, on ? onText : offText);
+
+    function emailCard() {
+      const card = el("section", { class: "card" }, el("h2", {}, "Email address"));
+      if (!s.emailAvailable) {
+        put(card, el("p", { class: "muted" }, "Email isn't switched on for this site yet, so email verification and email codes are unavailable for now."));
+        return card;
+      }
+      if (s.email && !editingEmail) {
+        put(card, el("div", { class: "set-row" }, el("div", {}, el("strong", {}, s.email), el("div", { class: "dim" }, "Used for sign-in codes and security alerts.")), badge(s.emailVerified, "Verified", "Not verified")),
+          el("div", { class: "actions" },
+            el("button", { type: "button", class: "btn small secondary", onclick: () => { editingEmail = true; draw(); } }, "Change email"),
+            el("button", { type: "button", class: "btn small ghost", onclick: () => { open = open === "removeEmail" ? null : "removeEmail"; draw(); } }, "Remove")));
+        if (open === "removeEmail") {
+          put(card, el("p", { class: "hint" }, s.twoFactor.email ? "This also turns off email codes." : "Enter your password to remove this email."),
+            passwordGate("Remove email", (pw) => run(() => api("POST", "/account/email/remove", { password: pw }), "Email removed.")));
+        }
+      }
+      if (s.pendingEmail) {
+        const code = el("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", required: true, placeholder: "123456", class: "code-input", "aria-label": "Verification code" });
+        const form = el("form", {}, el("p", {}, `We sent a 6-digit code to ${s.pendingEmail}. Enter it to verify the address.`),
+          el("div", { class: "row" }, code, el("button", { type: "submit", class: "btn" }, "Verify")));
+        form.addEventListener("submit", (e) => {
+          e.preventDefault();
+          run(async () => { const r = await api("POST", "/account/email/verify", { code: code.value }); editingEmail = false; return { ...r, twoFactor: r.twoFactor }; }, "Email verified.");
+        });
+        put(card, form, el("button", { type: "button", class: "btn small ghost", onclick: () => run(() => api("POST", "/account/email", { email: s.pendingEmail }), "New code sent.") }, "Send a new code"));
+      } else if (!s.email || editingEmail) {
+        const input = el("input", { type: "email", name: "email", autocomplete: "email", required: true, placeholder: "you@example.com", "aria-label": "Email address" });
+        const form = el("form", {}, el("p", { class: "muted" }, "Add an email so you can get sign-in codes. We'll send a code to check it's yours."),
+          el("div", { class: "row" }, input, el("button", { type: "submit", class: "btn" }, "Send code")));
+        form.addEventListener("submit", (e) => { e.preventDefault(); run(() => api("POST", "/account/email", { email: input.value }), "Code sent. Check your inbox."); });
+        put(card, form);
+        if (editingEmail) put(card, el("button", { type: "button", class: "btn small ghost", onclick: () => { editingEmail = false; draw(); } }, "Cancel"));
+      }
+      return card;
+    }
+
+    function appRow() {
+      const on = s.twoFactor.app;
+      const row = el("div", { class: "tfa-row" },
+        el("div", { class: "tfa-head" },
+          el("span", { class: "page-ico" }, icon("phone")),
+          el("div", { class: "grow" }, el("strong", {}, "Authenticator app"),
+            el("p", { class: "muted" }, "Get a new 6-digit code every 30 seconds from an app on your phone. We suggest Google Authenticator; Microsoft Authenticator, Authy and 1Password work too.")),
+          badge(on)),
+        el("div", { class: "actions" }, on
+          ? el("button", { type: "button", class: "btn small ghost", onclick: () => { open = open === "appOff" ? null : "appOff"; draw(); } }, "Turn off")
+          : el("button", { type: "button", class: "btn small", onclick: async () => {
+            say("");
+            try { setup = await api("POST", "/account/2fa/app/setup"); open = "appSetup"; } catch (err) { say(err.message); }
+            draw();
+          } }, "Set up")));
+      if (open === "appOff") {
+        put(row, el("p", { class: "hint" }, "Enter your password to turn off the authenticator app."),
+          passwordGate("Turn off", (pw) => run(() => api("POST", "/account/2fa/app/disable", { password: pw }), "Authenticator app turned off.")));
+      }
+      if (open === "appSetup" && setup) {
+        const code = el("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", required: true, placeholder: "123456", class: "code-input", "aria-label": "6-digit code from your app" });
+        const form = el("form", {}, el("div", { class: "row" }, code, el("button", { type: "submit", class: "btn" }, "Turn on")));
+        form.addEventListener("submit", (e) => {
+          e.preventDefault();
+          run(async () => { const r = await api("POST", "/account/2fa/app/enable", { code: code.value }); setup = null; return r; }, "Authenticator app is on. You'll need a code each time you log in.");
+        });
+        const key = setup.secret.replace(/(.{4})/g, "$1 ").trim();
+        put(row, el("div", { class: "setup" },
+          el("ol", { class: "setup-steps" },
+            el("li", {}, "Install ", el("strong", {}, "Google Authenticator"), " (or any authenticator app) on your phone."),
+            el("li", {}, "In the app, tap ", el("strong", {}, "+"), " and scan this QR code."),
+            el("li", {}, "Type the 6-digit code it shows below.")),
+          el("div", { class: "setup-body" },
+            qrSvg(setup.otpauthUrl),
+            el("div", {},
+              el("p", { class: "hint" }, "Can't scan it? Choose \u201cEnter a setup key\u201d in the app and type:"),
+              el("p", { class: "code key" }, key),
+              copyButton(setup.secret, "Copy key"),
+              el("label", {}, "Code from the app"),
+              form,
+              el("button", { type: "button", class: "btn small ghost", onclick: () => { open = null; setup = null; draw(); } }, "Cancel")))));
+        setTimeout(() => code.focus(), 0);
+      }
+      return row;
+    }
+
+    function emailRow() {
+      const on = s.twoFactor.email;
+      const can = s.emailAvailable && s.emailVerified;
+      const row = el("div", { class: "tfa-row" },
+        el("div", { class: "tfa-head" },
+          el("span", { class: "page-ico" }, icon("mail")),
+          el("div", { class: "grow" }, el("strong", {}, "Email codes"),
+            el("p", { class: "muted" }, can ? `When you log in, we email a 6-digit code to ${s.email}.` : "Verify an email address above to use this.")),
+          badge(on)),
+        el("div", { class: "actions" }, on
+          ? el("button", { type: "button", class: "btn small ghost", onclick: () => { open = open === "emailOff" ? null : "emailOff"; draw(); } }, "Turn off")
+          : (() => { const b = el("button", { type: "button", class: "btn small", onclick: () => { open = open === "emailOn" ? null : "emailOn"; draw(); } }, "Turn on"); if (!can) b.disabled = true; return b; })()));
+      if (open === "emailOn") put(row, el("p", { class: "hint" }, "Enter your password to turn on email codes."), passwordGate("Turn on", (pw) => run(() => api("POST", "/account/2fa/email", { enable: true, password: pw }), "Email codes are on.")));
+      if (open === "emailOff") put(row, el("p", { class: "hint" }, "Enter your password to turn off email codes."), passwordGate("Turn off", (pw) => run(() => api("POST", "/account/2fa/email", { enable: false, password: pw }), "Email codes turned off.")));
+      return row;
+    }
+
+    function recoveryRow() {
+      const any = s.twoFactor.app || s.twoFactor.email;
+      if (!any) return null;
+      const left = s.twoFactor.recoveryCodesLeft;
+      const row = el("div", { class: "tfa-row" },
+        el("div", { class: "tfa-head" },
+          el("span", { class: "page-ico" }, icon("key")),
+          el("div", { class: "grow" }, el("strong", {}, "Recovery codes"),
+            el("p", { class: "muted" }, `${left} of 10 left. Use one to log in if you lose your phone or can't get to your email.`)),
+          el("span", { class: "badge " + (left > 3 ? "ok" : "funded") }, `${left} left`)),
+        el("div", { class: "actions" }, el("button", { type: "button", class: "btn small secondary", onclick: () => { open = open === "codes" ? null : "codes"; draw(); } }, "Make new codes")));
+      if (open === "codes") put(row, el("p", { class: "hint" }, "Your old codes will stop working. Enter your password to continue."), passwordGate("Make new codes", (pw) => run(() => api("POST", "/account/2fa/recovery-codes", { password: pw }), "New recovery codes made.")));
+      return row;
+    }
+
+    function draw() {
+      if (!alive(gen)) return;
+      wrap.textContent = "";
+      const on = s.twoFactor.app || s.twoFactor.email;
+      put(wrap,
+        el("h2", { class: "section-title" }, "Security"),
+        note,
+        showCodes ? recoveryPanel(showCodes) : null,
+        emailCard(),
+        el("section", { class: "card" },
+          el("div", { class: "row between" }, el("h2", {}, "Two-step verification"), badge(on, "On", "Off")),
+          el("p", { class: "muted" }, "Ask for a code as well as your password when you log in, so a stolen password isn't enough to get into your account."),
+          appRow(), emailRow(), recoveryRow()));
+      showCodes = null;
+    }
+
+    api("GET", "/account/security").then((r) => { s = r; draw(); }).catch((err) => say(err.message));
+    put(wrap, el("p", { class: "muted" }, "Loading security settings..."));
+    return wrap;
+  }
+
   async function viewSettings(view, _arg, gen) {
     const health = await fetch("/health").then((r) => r.json()).catch(() => null);
     await refreshMe();
@@ -1146,6 +1424,7 @@
         el("div", { class: "set-row" }, el("span", {}, "Theme"), seg)));
 
     if (me.kind === "human") {
+      put(view, securitySection(gen));
       const form = el("form", {},
         el("h2", {}, "Change password"),
         el("p", { class: "muted" }, "Other browsers where you're logged in will be signed out."),

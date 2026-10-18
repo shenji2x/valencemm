@@ -60,6 +60,51 @@ function createApi(store, opts = {}) {
     }));
   }
 
+  // ---- people: two-factor sign-in and security settings ----
+  const mailer = opts.mailer || { enabled: false, async send() { throw new Error("off"); } };
+  const emailLimit = limiter({ windowMs: 3600 * 1000, max: opts.emailLimit || 12, code: "email_rate_limited" });
+  const { codeEmail } = require("./email");
+  async function sendCode(purpose, { to, code, username }) {
+    if (!mailer.enabled) throw new ApiError(503, "email_unavailable", "Email isn't set up on this server yet");
+    try {
+      await mailer.send({ to, ...codeEmail({ code, purpose, username }) });
+    } catch (err) {
+      console.error("Email send failed:", err && err.message);
+      throw new ApiError(502, "email_failed", "We couldn't send the email. Try again in a minute.");
+    }
+  }
+
+  add("POST", "/humans/login/email-code", { limit: emailLimit }, async ({ body }) => {
+    if (!mailer.enabled) throw new ApiError(503, "email_unavailable", "Email isn't set up on this server yet");
+    const r = store.loginEmailCode(body.challenge);
+    await sendCode("login", r);
+    return { body: { sent: true, emailHint: r.emailHint } };
+  });
+  add("POST", "/humans/login/verify", { limit: loginLimit }, ({ body }) => ({
+    body: store.completeLogin(body.challenge, body.method, body.code),
+  }));
+
+  add("GET", "/account/security", { auth: true }, ({ account }) => ({
+    body: { ...store.security(account), emailAvailable: Boolean(mailer.enabled) },
+  }));
+  add("POST", "/account/email", { auth: true, limit: emailLimit }, async ({ account, body }) => {
+    if (!mailer.enabled) throw new ApiError(503, "email_unavailable", "Email isn't set up on this server yet");
+    const r = store.startEmailVerification(account, body.email);
+    await sendCode("verify", r);
+    return { body: { sent: true, ...store.security(account) } };
+  });
+  add("POST", "/account/email/verify", { auth: true, limit: loginLimit }, ({ account, body }) => ({ body: store.confirmEmail(account, body.code) }));
+  add("POST", "/account/email/remove", { auth: true, limit: loginLimit }, async ({ account, body }) => ({ body: await store.removeEmail(account, body.password) }));
+  add("POST", "/account/2fa/app/setup", { auth: true }, ({ account }) => ({ body: store.totpSetup(account) }));
+  add("POST", "/account/2fa/app/enable", { auth: true, limit: loginLimit }, ({ account, body }) => ({ body: store.totpEnable(account, body.code) }));
+  add("POST", "/account/2fa/app/disable", { auth: true, limit: loginLimit }, async ({ account, body }) => ({ body: await store.totpDisable(account, body.password) }));
+  add("POST", "/account/2fa/email", { auth: true, limit: loginLimit }, async ({ account, body }) => ({
+    body: await store.setEmailTwoFactor(account, body.enable === true, body.password),
+  }));
+  add("POST", "/account/2fa/recovery-codes", { auth: true, limit: loginLimit }, async ({ account, body }) => ({
+    body: await store.newRecoveryCodes(account, body.password),
+  }));
+
   // ---- people: password ----
   add("POST", "/humans/password", { auth: true, limit: loginLimit }, async ({ account, token, body }) => ({
     body: await store.changePassword(account, token, body.currentPassword, body.newPassword),

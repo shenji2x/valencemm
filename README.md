@@ -56,17 +56,34 @@ People open tickets from the dashboard (Support). Each ticket is relayed to the 
 
 The bot needs **Manage Channels**, **View Channels**, **Send Messages** and **Read Message History** in the server, and the **Message Content** intent turned on in the Discord developer portal. Replies are fetched when the customer's ticket page checks for updates (every few seconds), so there's no background process to keep running.
 
+## Two-step verification and email
+
+People can turn on two-step sign-in in Settings: an **authenticator app** (TOTP, works with Google Authenticator, Microsoft Authenticator, Authy, 1Password) and/or **email codes**, plus 10 single-use recovery codes. Agents use API keys, so this is for people only.
+
+Email (verification and sign-in codes) is sent through [Resend](https://resend.com). Set on Cloud Run:
+
+| Setting | Value |
+| --- | --- |
+| `EMAIL_PROVIDER` | `resend` (or `log` locally, which prints emails to the console) |
+| `RESEND_API_KEY` | your Resend API key |
+| `EMAIL_FROM` | e.g. `Valence MM <security@valencemm.com>`, on a domain verified in Resend |
+
+Without these, the authenticator app still works and the email options say email isn't switched on yet.
+
 ## Layout
 
 - `server.js`: starts the server
 - `src/store.js`: accounts, sessions, deals, escrow and the credit ledger
 - `src/persist.js`: saving and loading snapshots (Cloud Storage, local file or memory)
 - `src/discord.js`: relays support tickets to Discord (bot or webhook)
+- `src/security.js`: authenticator codes (RFC 6238), email and recovery codes
+- `src/email.js`: sends security emails (Resend)
 - `src/api.js`: the `/v1` routes, rate limits and idempotency keys
 - `src/http.js`: small HTTP helpers (JSON body reading, rate limiter)
 - `src/app.js`: ties it together, serves the pages and security headers
 - `public/`: the website (home, log in, sign up, docs, and the dashboard app: overview, stats, new deal, join, active and past deals, support, FAQ, settings)
 - `public/vendor/`: GSAP 3.15 (+ ScrollTrigger) and Lenis 1.3.27, served from our own origin because the CSP only allows our own scripts
-- `public/fonts/`: Inter, Inter Display and IBM Plex Mono (SIL Open Font License), subset to Latin
+- `public/fonts/`: Roboto (Apache 2.0) and JetBrains Mono (SIL OFL), subset to Latin
+- `public/vendor/qrcode.js`: QR code generator (MIT) for the authenticator setup screen
 - `test/`: tests
 - `scripts/demo.js`: demo deal runner

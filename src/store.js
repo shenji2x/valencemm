@@ -5,6 +5,7 @@
 const crypto = require("crypto");
 const { promisify } = require("util");
 const { ApiError } = require("./errors");
+const sec = require("./security");
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -28,6 +29,12 @@ const MAX_TICKETS = 20000;
 const MAX_OPEN_TICKETS_PER_ACCOUNT = 5;
 const MAX_TICKET_MESSAGES = 300;
 const DAY_MS = 24 * 3600 * 1000;
+const CODE_TTL_MS = 10 * 60 * 1000; // email codes and sign-in challenges
+const TOTP_SETUP_TTL_MS = 15 * 60 * 1000;
+const MAX_CODE_ATTEMPTS = 5;
+const RESEND_AFTER_MS = 30 * 1000;
+const MAX_CHALLENGES = 20000;
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,24}$/i;
 
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const sha256Buf = (s) => crypto.createHash("sha256").update(s).digest();
@@ -75,6 +82,7 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
   const platform = { balance: 0 };
   let minted = 0; // every credit ever created (welcome grants + test codes)
   const dummySalt = crypto.randomBytes(16); // used to keep login timing similar for unknown usernames
+  const challenges = new Map(); // sha256(challenge token) -> pending two-factor sign-in (memory only, 10 minutes)
 
   function record(account, delta, dealId, memo) {
     ledger.push({ id: ledger.length + 1, at: now(), account, delta, dealId: dealId || null, memo });
@@ -187,6 +195,63 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     return null;
   }
 
+  // ---- two-factor helpers ----
+  async function passwordMatches(a, password) {
+    if (typeof password !== "string" || password.length > 128 || !a.salt) return false;
+    const hash = await scrypt(password, a.salt, 64);
+    return crypto.timingSafeEqual(hash, a.hash);
+  }
+  async function mustHavePassword(a, password) {
+    if (!(await passwordMatches(a, password))) throw new ApiError(401, "invalid_login", "Your password isn't right");
+  }
+  function mustBeHuman(a) {
+    if (a.kind !== "human") throw new ApiError(403, "wrong_account_type", "AI agents sign in with API keys, so these settings are for people only");
+  }
+  function twoFactorMethods(a) {
+    const m = [];
+    if (a.totp && a.totp.enabled) m.push("app");
+    if (a.email2fa && a.emailVerified) m.push("email");
+    if (m.length && (a.recovery || []).length) m.push("recovery");
+    return m;
+  }
+  function maskEmail(email) {
+    if (!email) return null;
+    const [user, domain] = email.split("@");
+    return `${user.slice(0, 2)}${"*".repeat(Math.max(1, Math.min(6, user.length - 2)))}@${domain}`;
+  }
+  function securityView(a) {
+    return {
+      email: a.email || null,
+      emailVerified: Boolean(a.emailVerified),
+      pendingEmail: a.emailPending && a.emailPending.expiresAt > now() ? a.emailPending.email : null,
+      twoFactor: { app: Boolean(a.totp && a.totp.enabled), email: Boolean(a.email2fa && a.emailVerified), recoveryCodesLeft: (a.recovery || []).length },
+    };
+  }
+  function ensureRecoveryCodes(a) {
+    if ((a.recovery || []).length) return null; // keep the ones they already saved
+    const codes = sec.newRecoveryCodes();
+    a.recovery = codes.map((c) => sec.hashCode(a.id, sec.normalizeRecovery(c)));
+    return codes;
+  }
+  function useRecoveryCode(a, code) {
+    const h = sec.hashCode(a.id, sec.normalizeRecovery(code));
+    const i = (a.recovery || []).findIndex((x) => sec.safeEqual(x, h));
+    if (i === -1) return false;
+    a.recovery.splice(i, 1); // each code works once
+    return true;
+  }
+  function mustGetChallenge(token) {
+    const key = typeof token === "string" && token.startsWith("vlt_") ? sha256(token) : null;
+    const c = key && challenges.get(key);
+    if (!c || c.expiresAt <= now()) {
+      if (key) challenges.delete(key);
+      throw new ApiError(401, "challenge_expired", "Your sign-in timed out. Enter your password again.");
+    }
+    const a = accounts.get(c.accountId);
+    if (!a) throw new ApiError(401, "challenge_expired", "Your sign-in timed out. Enter your password again.");
+    return { c, a, key };
+  }
+
   function checkCapacity() {
     if (accounts.size >= MAX_ACCOUNTS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
   }
@@ -234,9 +299,152 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
         await scrypt(password, dummySalt, 64); // spend similar time so usernames can't be probed by timing
         throw fail();
       }
-      const hash = await scrypt(password, person.salt, 64);
-      if (!crypto.timingSafeEqual(hash, person.hash)) throw fail();
+      if (!(await passwordMatches(person, password))) throw fail();
+      const methods = twoFactorMethods(person);
+      if (methods.length) {
+        // Password was right, but a second step is needed before we hand out a session.
+        if (challenges.size >= MAX_CHALLENGES) challenges.delete(challenges.keys().next().value);
+        const challenge = "vlt_" + crypto.randomBytes(24).toString("hex");
+        challenges.set(sha256(challenge), { accountId: person.id, expiresAt: now() + CODE_TTL_MS, attempts: 0, email: null });
+        return { twoFactorRequired: true, challenge, methods, emailHint: person.email2fa ? maskEmail(person.email) : null };
+      }
       return { token: newSession(person), account: publicAccount(person) };
+    },
+
+    // Step 2 of signing in with two-factor on: send an email code for this challenge.
+    loginEmailCode(challengeToken) {
+      const { c, a } = mustGetChallenge(challengeToken);
+      if (!a.email2fa || !a.emailVerified) throw new ApiError(400, "method_unavailable", "Email codes aren't turned on for this account");
+      if (c.email && now() - c.email.sentAt < RESEND_AFTER_MS) throw new ApiError(429, "too_soon", "Wait a few seconds before asking for another code");
+      const code = sec.newNumericCode();
+      c.email = { hash: sec.hashCode(a.id, code), sentAt: now(), expiresAt: now() + CODE_TTL_MS };
+      return { to: a.email, code, username: a.name, emailHint: maskEmail(a.email) };
+    },
+
+    // Step 2 of signing in: check the code and hand out the session.
+    completeLogin(challengeToken, method, rawCode) {
+      const { c, a, key } = mustGetChallenge(challengeToken);
+      c.attempts++;
+      if (c.attempts > MAX_CODE_ATTEMPTS) {
+        challenges.delete(key);
+        throw new ApiError(429, "too_many_attempts", "Too many wrong codes. Log in again to get a new chance.");
+      }
+      const code = String(rawCode || "").trim();
+      let ok = false;
+      if (method === "app" && a.totp && a.totp.enabled) {
+        const step = sec.verifyTotp(a.totp.secret, code, now(), a.totp.lastStep);
+        if (step !== null) { a.totp.lastStep = step; ok = true; }
+      } else if (method === "email" && a.email2fa && c.email) {
+        ok = c.email.expiresAt > now() && sec.safeEqual(c.email.hash, sec.hashCode(a.id, code.replace(/\s+/g, "")));
+        if (c.email.expiresAt <= now()) throw new ApiError(400, "code_expired", "That code has expired. Send a new one.");
+      } else if (method === "recovery") {
+        ok = useRecoveryCode(a, code);
+      } else {
+        throw new ApiError(400, "invalid_method", "Choose the authenticator app, an email code or a recovery code");
+      }
+      if (!ok) throw new ApiError(401, "invalid_code", "That code isn't right. Check it and try again.");
+      challenges.delete(key);
+      return { token: newSession(a), account: publicAccount(a), recoveryCodesLeft: (a.recovery || []).length };
+    },
+
+    // ---- people: email and two-factor settings ----
+    security(account) {
+      mustBeHuman(account);
+      return securityView(account);
+    },
+
+    startEmailVerification(account, rawEmail) {
+      mustBeHuman(account);
+      const email = typeof rawEmail === "string" ? rawEmail.trim().toLowerCase() : "";
+      if (!EMAIL_RE.test(email) || email.length > 254) throw new ApiError(400, "invalid_email", "Enter a valid email address");
+      for (const other of accounts.values()) {
+        if (other !== account && other.emailVerified && other.email === email) throw new ApiError(409, "email_in_use", "That email is already used by another account");
+      }
+      const p = account.emailPending;
+      if (p && p.email === email && now() - p.sentAt < RESEND_AFTER_MS) throw new ApiError(429, "too_soon", "Wait a few seconds before asking for another code");
+      const code = sec.newNumericCode();
+      account.emailPending = { email, hash: sec.hashCode(account.id, code), sentAt: now(), expiresAt: now() + CODE_TTL_MS, attempts: 0 };
+      return { to: email, code, username: account.name };
+    },
+
+    confirmEmail(account, rawCode) {
+      mustBeHuman(account);
+      const p = account.emailPending;
+      if (!p) throw new ApiError(400, "no_pending_email", "Add an email address first");
+      if (p.expiresAt <= now()) throw new ApiError(400, "code_expired", "That code has expired. Send a new one.");
+      p.attempts++;
+      if (p.attempts > MAX_CODE_ATTEMPTS) {
+        delete account.emailPending;
+        throw new ApiError(429, "too_many_attempts", "Too many wrong codes. Send a new one.");
+      }
+      const code = String(rawCode || "").replace(/\s+/g, "");
+      if (!sec.safeEqual(p.hash, sec.hashCode(account.id, code))) throw new ApiError(401, "invalid_code", "That code isn't right. Check it and try again.");
+      account.email = p.email;
+      account.emailVerified = true;
+      delete account.emailPending;
+      return securityView(account);
+    },
+
+    async removeEmail(account, password) {
+      mustBeHuman(account);
+      await mustHavePassword(account, password);
+      account.email = null;
+      account.emailVerified = false;
+      account.email2fa = false;
+      delete account.emailPending;
+      if (!twoFactorMethods(account).length) account.recovery = [];
+      return securityView(account);
+    },
+
+    totpSetup(account) {
+      mustBeHuman(account);
+      if (account.totp && account.totp.enabled) throw new ApiError(409, "already_enabled", "The authenticator app is already set up. Turn it off first to switch phones.");
+      const secret = sec.newTotpSecret();
+      account.totpPending = { secret, expiresAt: now() + TOTP_SETUP_TTL_MS };
+      return { secret, otpauthUrl: sec.otpauthUrl({ secret, account: account.username }) };
+    },
+
+    totpEnable(account, code) {
+      mustBeHuman(account);
+      const p = account.totpPending;
+      if (!p || p.expiresAt <= now()) throw new ApiError(400, "setup_expired", "Setup timed out. Start again to get a new QR code.");
+      const step = sec.verifyTotp(p.secret, code, now());
+      if (step === null) throw new ApiError(401, "invalid_code", "That code doesn't match. Check your phone's clock and try the newest code.");
+      account.totp = { secret: p.secret, enabled: true, lastStep: step, enabledAt: now() };
+      delete account.totpPending;
+      const recoveryCodes = ensureRecoveryCodes(account); // make the codes first so the counts below include them
+      return { ...securityView(account), recoveryCodes };
+    },
+
+    async totpDisable(account, password) {
+      mustBeHuman(account);
+      await mustHavePassword(account, password);
+      account.totp = null;
+      if (!twoFactorMethods(account).length) account.recovery = [];
+      return securityView(account);
+    },
+
+    async setEmailTwoFactor(account, enable, password) {
+      mustBeHuman(account);
+      await mustHavePassword(account, password);
+      if (enable) {
+        if (!account.emailVerified) throw new ApiError(400, "email_not_verified", "Verify your email address first");
+        account.email2fa = true;
+        const recoveryCodes = ensureRecoveryCodes(account); // make the codes first so the counts below include them
+      return { ...securityView(account), recoveryCodes };
+      }
+      account.email2fa = false;
+      if (!twoFactorMethods(account).length) account.recovery = [];
+      return securityView(account);
+    },
+
+    async newRecoveryCodes(account, password) {
+      mustBeHuman(account);
+      await mustHavePassword(account, password);
+      if (!twoFactorMethods(account).length) throw new ApiError(400, "two_factor_off", "Turn on two-factor first");
+      account.recovery = [];
+      const recoveryCodes = ensureRecoveryCodes(account); // make the codes first so the counts below include them
+      return { ...securityView(account), recoveryCodes };
     },
 
     // Accepts an AI agent API key (vlc_...) or a person's session token (vls_...).
@@ -264,6 +472,7 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       const recent = ledger.filter((e) => e.account === account.id).slice(-20).reverse();
       return {
         ...publicAccount(account),
+        ...(account.kind === "human" ? { security: securityView(account) } : {}),
         recentLedger: recent.map((e) => ({ at: new Date(e.at).toISOString(), delta: e.delta, dealId: e.dealId, memo: e.memo })),
       };
     },

@@ -1,0 +1,3 @@
+Roboto (Copyright 2011 Google Inc.) is licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+These files are subsets of the original fonts, converted to WOFF for the web.
