@@ -66,6 +66,9 @@
     out: "M7 17L17 7M8 7h9v9",
     back: "M15 18l-6-6 6-6",
     copy: "M9 9h11v11H9zM5 15H4V4h11v1",
+    image: "M3 5h18v14H3zM3 16l5-5 4 4 3-3 6 6M15.5 8.5h.01",
+    doc: "M14 3H6v18h12V7zM14 3v4h4M9 13h6M9 17h6",
+    discord: "M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.8A8 8 0 1 1 21 12zM8.5 11h.01M12 11h.01M15.5 11h.01",
     phone: "M7 2h10a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM11 18h2",
     mail: "M3 5h18v14H3zM3 6l9 7 9-7",
     key: "M8 14a4 4 0 1 0 0-.01M11 12l9-9M17 6l3 3M15 8l2 2",
@@ -205,6 +208,115 @@
       }
     });
     return b;
+  }
+
+
+  // ---------- images and files that need the account's token ----------
+  // The API uses a bearer token, so a plain <img src> wouldn't be allowed to load an
+  // attachment. Each one is fetched with the token and shown from an in-memory blob.
+  async function authBlob(path) {
+    const token = getToken();
+    const res = await fetch("/v1" + path, { headers: token ? { Authorization: "Bearer " + token } : {} });
+    if (!res.ok) throw new Error("Couldn't load that file.");
+    return res.blob();
+  }
+  function showImage(img, path) {
+    authBlob(path).then((blob) => {
+      const url = URL.createObjectURL(blob);
+      img.src = url;
+      img.addEventListener("load", () => setTimeout(() => URL.revokeObjectURL(url), 30000), { once: true });
+    }).catch(() => { img.replaceWith(el("span", { class: "dim" }, "Image unavailable")); });
+  }
+  async function downloadAuth(path, filename) {
+    const blob = await authBlob(path);
+    const url = URL.createObjectURL(blob);
+    const a = el("a", { href: url, download: filename });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  async function uploadImage(file) {
+    const token = getToken();
+    const res = await fetch("/v1/uploads", {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream", "X-File-Name": encodeURIComponent(file.name || "image"), ...(token ? { Authorization: "Bearer " + token } : {}) },
+      body: file,
+    });
+    let data = {};
+    try { data = await res.json(); } catch { /* empty */ }
+    if (!res.ok) throw new Error((data.error && data.error.message) || "That image couldn't be uploaded.");
+    return data;
+  }
+
+  // "Add images" button plus the chips for what's attached so far.
+  function attachBar(limits, onError) {
+    const max = (limits && limits.maxFiles) || 4;
+    const maxBytes = (limits && limits.maxBytes) || 8 * 1024 * 1024;
+    const chosen = [];
+    const chips = el("div", { class: "chips files" });
+    const input = el("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp", multiple: true, class: "sr-only", id: "att-" + newKey().slice(0, 8) });
+    const button = el("button", { type: "button", class: "btn small secondary", onclick: () => input.click() }, icon("image"), "Add images");
+    const hint = el("span", { class: "dim" }, `Up to ${max} images, ${Math.round(maxBytes / 1024 / 1024)} MB each`);
+
+    function redraw() {
+      chips.textContent = "";
+      for (const f of chosen) {
+        const chip = el("span", { class: "file-chip" }, el("span", {}, f.name),
+          el("button", { type: "button", "aria-label": `Remove ${f.name}`, onclick: () => { chosen.splice(chosen.indexOf(f), 1); redraw(); } }, "\u00d7"));
+        chips.append(chip);
+      }
+      button.disabled = chosen.length >= max;
+    }
+    async function take(files) {
+      for (const file of files) {
+        if (chosen.length >= max) return onError(`You can attach up to ${max} images.`);
+        if (file.size > maxBytes) { onError(`${file.name} is too big (limit ${Math.round(maxBytes / 1024 / 1024)} MB).`); continue; }
+        const placeholder = { name: file.name, pending: true };
+        chosen.push(placeholder);
+        redraw();
+        try {
+          const rec = await uploadImage(file);
+          Object.assign(placeholder, rec, { pending: false });
+        } catch (err) {
+          chosen.splice(chosen.indexOf(placeholder), 1);
+          onError(err.message);
+        }
+        redraw();
+      }
+    }
+    input.addEventListener("change", () => { take([...input.files]); input.value = ""; });
+    return {
+      node: el("div", { class: "attach-bar" }, input, button, hint, chips),
+      ids: () => chosen.filter((f) => f.id).map((f) => f.id),
+      busy: () => chosen.some((f) => f.pending),
+      clear: () => { chosen.length = 0; redraw(); },
+      takeFiles: take,
+    };
+  }
+
+  // Thumbnails under a message.
+  function attachmentsNode(ticketId, attachments) {
+    if (!attachments || !attachments.length) return null;
+    const box = el("div", { class: "shots" });
+    for (const a of attachments) {
+      const img = el("img", { alt: a.name, loading: "lazy" });
+      showImage(img, `/tickets/${encodeURIComponent(ticketId)}/attachments/${encodeURIComponent(a.id)}`);
+      const open = el("button", { type: "button", class: "shot", title: a.name, onclick: () => lightbox(img.src, a.name) }, img);
+      box.append(open);
+    }
+    return box;
+  }
+
+  function lightbox(src, name) {
+    if (!src) return;
+    const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    const box = el("div", { class: "lightbox", role: "dialog", "aria-label": name, onclick: close },
+      el("img", { src, alt: name }));
+    document.addEventListener("keydown", onKey);
+    document.body.append(box);
   }
 
   // ---------- theme ----------
@@ -1069,6 +1181,7 @@
       el("div", {}, el("strong", {}, "Join our Discord"), el("span", {}, "Chat with the team and other users. Good for quick questions.")),
       el("a", { class: "btn small", href: info.discordInvite || DISCORD_INVITE, target: "_blank", rel: "noopener" }, "Open Discord", icon("out")));
 
+    const attach = attachBar(info.attachments, (m) => flash(m));
     const cat = el("select", { id: "t-category", name: "category" }, TICKET_CATEGORIES.map(([v, l]) => el("option", { value: v }, l)));
     const dealSel = el("select", { id: "t-deal", name: "dealId" }, el("option", { value: "" }, "No specific deal"),
       dealsRes.deals.slice(0, 50).map((d) => el("option", { value: d.id }, `${d.title} (${STATE_LABELS[d.state]})`)));
@@ -1081,9 +1194,15 @@
       el("label", { for: "t-deal" }, "Related deal"), dealSel,
       el("label", { for: "t-subject" }, "Subject"), el("input", { id: "t-subject", name: "subject", required: true, minlength: "3", maxlength: "100", placeholder: "A short summary" }),
       el("label", { for: "t-message" }, "Message"), el("textarea", { id: "t-message", name: "message", required: true, minlength: "5", maxlength: "2000", placeholder: "What happened, and what did you expect?" }),
+      el("label", {}, "Screenshots (optional)"),
+      attach.node,
       el("button", { type: "submit", class: "btn" }, "Send ticket"));
     bindForm(form, async (f) => {
-      const t = await api("POST", "/tickets", { category: val(f, "category"), dealId: val(f, "dealId") || null, subject: val(f, "subject"), message: val(f, "message") });
+      if (attach.busy()) throw new Error("Wait for the images to finish uploading.");
+      const t = await api("POST", "/tickets", {
+        category: val(f, "category"), dealId: val(f, "dealId") || null,
+        subject: val(f, "subject"), message: val(f, "message"), attachmentIds: attach.ids(),
+      });
       location.hash = "#support/" + encodeURIComponent(t.id);
     });
 
@@ -1098,7 +1217,15 @@
         el("span", { class: "badge " + (t.status === "open" ? "open" : "closed") }, t.status === "open" ? "Open" : "Closed"))))));
     };
     drawTickets(list.tickets);
-    put(view, discordCard, el("div", { class: "support-grid" }, el("section", { class: "card" }, form), ticketsCard));
+    const linked = app.me.security && app.me.security.discord;
+    const linkCard = info.discordLinking && app.me.kind === "human" && !linked
+      ? el("div", { class: "discord-card subtle" },
+        el("span", { class: "page-ico" }, icon("discord")),
+        el("div", {}, el("strong", {}, "Link your Discord first (optional)"),
+          el("span", {}, "Linked accounts get added to their own ticket channel in the server, so you can follow along there as well as here.")),
+        el("a", { class: "btn small secondary", href: "#settings" }, "Link in Settings"))
+      : null;
+    put(view, discordCard, linkCard, el("div", { class: "support-grid" }, el("section", { class: "card" }, form), ticketsCard));
     let last = JSON.stringify(list.tickets);
     every(6000, async () => {
       const r = await api("GET", "/tickets");
@@ -1118,15 +1245,32 @@
     put(view, el("a", { class: "back", href: "#support" }, icon("back"), "Support"),
       el("section", { class: "card" }, head, chat, foot));
 
+    function transcriptButton() {
+      const b = el("button", { type: "button", class: "btn ghost small" }, icon("doc"), "Download transcript");
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try {
+          await downloadAuth(`/tickets/${encodeURIComponent(id)}/transcript`, `valence-ticket-${t.number}.html`);
+        } catch (err) {
+          flash(err.message);
+        } finally {
+          b.disabled = false;
+        }
+      });
+      return b;
+    }
+
     function drawHead() {
       head.textContent = "";
       put(head, el("div", { class: "deal-head" }, el("h2", {}, t.subject), el("span", { class: "badge " + (t.status === "open" ? "open" : "closed") }, t.status === "open" ? "Open" : "Closed")),
-        el("p", { class: "dim" }, `Opened ${when(t.createdAt)}${t.dealId ? " · about a deal" : ""}`));
+        el("p", { class: "dim" }, `Opened ${when(t.createdAt)}${t.dealId ? " · about a deal" : ""}${t.claimedBy ? " · handled by " + (t.claimedBy.role === "Owner" ? "the owner" : "support") : ""}`));
     }
     function drawChat() {
       chat.textContent = "";
       for (const m of t.messages) {
-        put(chat, el("div", { class: "bubble " + m.from }, m.text,
+        put(chat, el("div", { class: "bubble " + m.from },
+          m.text || null,
+          attachmentsNode(t.id, m.attachments),
           m.from === "system" ? null : el("small", {}, `${m.from === "user" ? "You" : m.author || "Support"} · ${ago(m.at)}`)));
       }
       if (t.status === "open" && !t.messages.some((m) => m.from === "staff")) {
@@ -1140,19 +1284,34 @@
         put(foot, el("p", { class: "muted" }, "This ticket is closed. ", el("a", { href: "#support" }, "Open a new one"), " if you still need help."));
         return;
       }
-      const text = el("textarea", { name: "text", required: true, maxlength: "2000", placeholder: "Write a message...", "aria-label": "Message" });
+      const text = el("textarea", { name: "text", maxlength: "2000", placeholder: "Write a message, or paste a screenshot...", "aria-label": "Message" });
+      const attach = attachBar(info.attachments, (m) => flash(m));
       const form = el("form", { class: "composer" }, text, el("button", { type: "submit", class: "btn" }, "Send"));
       text.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
       });
+      // Pasting or dropping a screenshot attaches it.
+      text.addEventListener("paste", (e) => {
+        const files = [...(e.clipboardData ? e.clipboardData.files : [])];
+        if (files.length) { e.preventDefault(); attach.takeFiles(files); }
+      });
+      foot.addEventListener("dragover", (e) => e.preventDefault());
+      foot.addEventListener("drop", (e) => {
+        e.preventDefault();
+        attach.takeFiles([...e.dataTransfer.files].filter((f) => f.type.startsWith("image/")));
+      });
       bindForm(form, async () => {
         const msg = text.value.trim();
-        if (!msg) return;
-        t = await api("POST", `/tickets/${encodeURIComponent(id)}/messages`, { text: msg });
+        const ids = attach.ids();
+        if (!msg && !ids.length) return;
+        if (attach.busy()) throw new Error("Wait for the images to finish uploading.");
+        t = await api("POST", `/tickets/${encodeURIComponent(id)}/messages`, { text: msg, attachmentIds: ids });
         text.value = "";
+        attach.clear();
         drawChat();
       });
-      put(foot, form, el("div", { class: "actions" },
+      put(foot, form, attach.node, el("div", { class: "actions" },
+        transcriptButton(),
         el("a", { class: "btn ghost small", href: info.discordInvite || DISCORD_INVITE, target: "_blank", rel: "noopener" }, "Discord", icon("out")),
         confirmButton("Close ticket", "ghost small", "Click again to close", async () => {
           t = await api("POST", `/tickets/${encodeURIComponent(id)}/close`);
@@ -1243,6 +1402,7 @@
     let showCodes = null; // recovery codes to show once after turning something on
     let open = null; // which inline panel is open
     let setup = null; // authenticator setup in progress
+    let linkCode = null; // Discord link code, once asked for
     let editingEmail = false;
 
     const note = el("p", { class: "flash", role: "status", "aria-live": "polite", hidden: true });
@@ -1294,6 +1454,44 @@
         form.addEventListener("submit", (e) => { e.preventDefault(); run(() => api("POST", "/account/email", { email: input.value }), "Code sent. Check your inbox."); });
         put(card, form);
         if (editingEmail) put(card, el("button", { type: "button", class: "btn small ghost", onclick: () => { editingEmail = false; draw(); } }, "Cancel"));
+      }
+      return card;
+    }
+
+    function discordCard() {
+      const card = el("section", { class: "card" }, el("h2", {}, "Discord"));
+      if (!s.discordLinking) {
+        put(card, el("p", { class: "muted" }, "Linking isn't switched on for this server yet. You can still ", el("a", { href: DISCORD_INVITE, target: "_blank", rel: "noopener" }, "join the Discord"), "."));
+        return card;
+      }
+      const linked = s.discord;
+      if (linked) {
+        put(card,
+          el("div", { class: "set-row" },
+            el("div", {}, el("strong", {}, linked.username), el("div", { class: "dim" }, "You're added to your own ticket channels in the server.")),
+            el("span", { class: "badge ok" }, "Linked")),
+          el("div", { class: "actions" },
+            el("a", { class: "btn small secondary", href: DISCORD_INVITE, target: "_blank", rel: "noopener" }, "Open Discord", icon("out")),
+            el("button", { type: "button", class: "btn small ghost", onclick: () => run(async () => { await api("POST", "/account/discord/unlink"); return { ...s, discord: null }; }, "Discord unlinked.") }, "Unlink")));
+        return card;
+      }
+      put(card, el("p", { class: "muted" }, "Link your Discord account and the support bot will add you to your own ticket channel in the server, so you can follow a ticket there as well as here."));
+      if (open === "discordCode" && linkCode) {
+        put(card,
+          el("ol", { class: "setup-steps" },
+            el("li", {}, "Join the Valence Discord server if you haven't already."),
+            el("li", {}, "In any channel there, type ", el("code", {}, "/link"), " and paste this code:"),
+            el("li", {}, "Come back here; it links straight away.")),
+          el("div", { class: "codebox" }, linkCode.code),
+          el("div", { class: "row" }, copyButton(linkCode.code, "Copy code"),
+            el("a", { class: "btn small secondary", href: linkCode.invite || DISCORD_INVITE, target: "_blank", rel: "noopener" }, "Open Discord", icon("out"))),
+          el("p", { class: "hint" }, "The code works once and expires in 15 minutes."));
+      } else {
+        put(card, el("div", { class: "actions" }, el("button", { type: "button", class: "btn small", onclick: async () => {
+          say("");
+          try { linkCode = await api("POST", "/account/discord/link-code"); open = "discordCode"; } catch (err) { say(err.message); }
+          draw();
+        } }, icon("discord"), "Get my link code")));
       }
       return card;
     }
@@ -1385,6 +1583,7 @@
         note,
         showCodes ? recoveryPanel(showCodes) : null,
         emailCard(),
+        discordCard(),
         el("section", { class: "card" },
           el("div", { class: "row between" }, el("h2", {}, "Two-step verification"), badge(on, "On", "Off")),
           el("p", { class: "muted" }, "Ask for a code as well as your password when you log in, so a stolen password isn't enough to get into your account."),
@@ -1393,6 +1592,17 @@
     }
 
     api("GET", "/account/security").then((r) => { s = r; draw(); }).catch((err) => say(err.message));
+    // The link happens in Discord, so check again when the tab comes back into view.
+    const recheck = async () => {
+      if (!alive(gen) || document.visibilityState !== "visible" || !s || s.discord) return;
+      try {
+        const r = await api("GET", "/account/security");
+        if (alive(gen) && r.discord && !s.discord) { s = r; open = null; linkCode = null; say("Discord linked.", "ok"); draw(); }
+      } catch { /* try again later */ }
+    };
+    document.addEventListener("visibilitychange", recheck);
+    const poll = setInterval(() => { if (!alive(gen)) return clearInterval(poll); if (open === "discordCode") recheck(); }, 5000);
+    app.timers.push(poll);
     put(wrap, el("p", { class: "muted" }, "Loading security settings..."));
     return wrap;
   }

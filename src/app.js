@@ -6,6 +6,8 @@ const { createApi } = require("./api");
 const { sendJson } = require("./http");
 const { createPersistence, backendFromEnv } = require("./persist");
 const { discordFromEnv } = require("./discord");
+const { blobsFromEnv } = require("./files");
+const { readRaw } = require("./http");
 const { mailerFromEnv } = require("./email");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
@@ -59,7 +61,7 @@ const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "Strict-Transport-Security": "max-age=15552000",
   "Content-Security-Policy":
-    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; " +
+    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data: blob:; manifest-src 'self'; " +
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
@@ -82,7 +84,9 @@ function createApp(opts = {}) {
   const persistence = createPersistence(store, opts.backend || backendFromEnv(), { onFatal: opts.onFatal });
   const discord = opts.discord || discordFromEnv();
   const mailer = opts.mailer || mailerFromEnv();
-  const handleApi = createApi(store, { ...opts, persistence, discord, mailer });
+  const blobs = opts.blobs || blobsFromEnv();
+  const apiParts = {};
+  const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, exports: apiParts });
   const statics = loadStatic();
 
   async function handle(req, res) {
@@ -113,6 +117,36 @@ function createApp(opts = {}) {
       return;
     }
 
+    // Slash commands. Discord signs every request, and anything unsigned is refused.
+    if (pathname === "/discord/interactions") {
+      if (req.method !== "POST") {
+        return sendError(res, { status: 405, code: "method_not_allowed", message: "Method not allowed", headers: { Allow: "POST" } }, true);
+      }
+      const signature = req.headers["x-signature-ed25519"];
+      const timestamp = req.headers["x-signature-timestamp"];
+      let raw;
+      try {
+        raw = await readRaw(req, 256 * 1024);
+      } catch (err) {
+        return sendError(res, err, true);
+      }
+      if (!signature || !timestamp || !discord.verify(signature, timestamp, raw)) {
+        return sendError(res, { status: 401, code: "bad_signature", message: "invalid request signature" }, true);
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(raw.toString("utf8"));
+      } catch {
+        return sendError(res, { status: 400, code: "invalid_json", message: "Body is not valid JSON" }, true);
+      }
+      try {
+        return sendJson(res, 200, await apiParts.support.handleInteraction(parsed));
+      } catch (err) {
+        console.error("Discord interaction failed:", err && err.message);
+        return sendJson(res, 200, { type: 4, data: { content: "Something went wrong handling that command.", flags: 64 } });
+      }
+    }
+
     if (pathname === "/health") {
       return sendJson(res, 200, {
         service: "Valence",
@@ -122,6 +156,8 @@ function createApp(opts = {}) {
         storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
         email: mailer.enabled ? "on" : "off",
         support: discord.mode === "bot" ? "discord (two-way)" : discord.mode === "webhook" ? "discord (notifications only)" : "website only",
+        slashCommands: discord.hasInteractions ? "on" : "off",
+        attachments: blobs.kind === "memory" ? "memory (not saved)" : "saved",
         ledger: store.audit().ok ? "balanced" : "UNBALANCED",
       });
     }
@@ -144,6 +180,12 @@ function createApp(opts = {}) {
   server.persistence = persistence;
   server.discord = discord;
   server.mailer = mailer;
+  server.blobs = blobs;
+  server.support = apiParts.support;
+  // Tell Discord which slash commands exist. Never blocks startup.
+  server.commandsRegistered = discord.mode === "bot" && !opts.skipCommandRegistration
+    ? discord.registerCommands().then(() => true).catch((err) => { console.error("Could not register Discord commands:", err.message); return false; })
+    : Promise.resolve(false);
   // Load the saved snapshot before taking traffic. server.js waits for this.
   server.ready = persistence.load();
   server.testCodesEnabled = testCodes.size > 0;

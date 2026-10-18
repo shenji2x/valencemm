@@ -34,6 +34,8 @@ const TOTP_SETUP_TTL_MS = 15 * 60 * 1000;
 const MAX_CODE_ATTEMPTS = 5;
 const RESEND_AFTER_MS = 30 * 1000;
 const MAX_CHALLENGES = 20000;
+const LINK_CODE_TTL_MS = 15 * 60 * 1000;
+const MAX_LINK_CODES = 5000;
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,24}$/i;
 
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
@@ -78,6 +80,7 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
   const dealsByInvite = new Map(); // inviteCode -> dealId
   const ledger = []; // append-only
   const tickets = new Map(); // ticketId -> support ticket
+  const discordLinks = new Map(); // link code -> { accountId, expiresAt } (short-lived, memory only)
   let ticketSeq = 0; // human-friendly ticket numbers (#1, #2, ...)
   const platform = { balance: 0 };
   let minted = 0; // every credit ever created (welcome grants + test codes)
@@ -172,7 +175,12 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       status: t.status,
       createdAt: new Date(t.createdAt).toISOString(),
       updatedAt: new Date(t.updatedAt).toISOString(),
-      messages: t.messages.map((m) => ({ id: m.id, from: m.from, author: m.author, text: m.text, at: new Date(m.at).toISOString() })),
+      // Customers see the role only; who it was is kept for the owner's records.
+      claimedBy: t.claimedBy ? { role: t.claimedBy.role, at: new Date(t.claimedBy.at).toISOString() } : null,
+      messages: t.messages.map((m) => ({
+        id: m.id, from: m.from, author: m.author, text: m.text, at: new Date(m.at).toISOString(),
+        attachments: (m.attachments || []).map((a) => ({ id: a.id, name: a.name, contentType: a.contentType, size: a.size })),
+      })),
     };
   }
 
@@ -188,6 +196,19 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     if (t.messages.length > MAX_TICKET_MESSAGES) t.messages.splice(0, t.messages.length - MAX_TICKET_MESSAGES);
     t.updatedAt = msg.at;
     return msg;
+  }
+
+  function claim(t, who) {
+    t.claimedBy = { discordUserId: who.discordUserId, name: who.author, role: who.role || "Support", at: now() };
+    // Customers see the role, never the staff member's Discord name.
+    pushTicketMessage(t, "system", "Valence", `${t.claimedBy.role === "Owner" ? "The owner" : "A support agent"} is handling this ticket.`);
+    noteHandler(t, who);
+  }
+  function noteHandler(t, who) {
+    if (!t.handlers) t.handlers = [];
+    if (!t.handlers.some((h) => h.discordUserId === who.discordUserId)) {
+      t.handlers.push({ discordUserId: who.discordUserId, name: who.author, role: who.role || "Support", at: now() });
+    }
   }
 
   function releasedAt(deal) {
@@ -221,6 +242,7 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
   }
   function securityView(a) {
     return {
+      discord: a.discord ? { username: a.discord.username, linkedAt: new Date(a.discord.linkedAt).toISOString() } : null,
       email: a.email || null,
       emailVerified: Boolean(a.emailVerified),
       pendingEmail: a.emailPending && a.emailPending.expiresAt > now() ? a.emailPending.email : null,
@@ -732,9 +754,9 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       }
       const t = {
         id: randomId("tkt"), number: ++ticketSeq, accountId: account.id, category, subject, dealId,
-        status: "open", createdAt: now(), updatedAt: now(), messages: [], discord: null,
+        status: "open", createdAt: now(), updatedAt: now(), messages: [], discord: null, claimedBy: null, handlers: [],
       };
-      pushTicketMessage(t, "user", account.name, message);
+      pushTicketMessage(t, "user", account.name, message, { attachments: input.attachments || [] });
       tickets.set(t.id, t);
       return ticketView(t);
     },
@@ -756,26 +778,65 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       return ticketView(mustGetTicket(account, ticketId));
     },
 
-    addTicketMessage(account, ticketId, rawText) {
+    addTicketMessage(account, ticketId, rawText, attachments = []) {
       const t = mustGetTicket(account, ticketId);
       if (t.status !== "open") throw new ApiError(409, "ticket_closed", "This ticket is closed. Open a new one if you still need help.");
-      const text = cleanText(rawText, "message", { min: 1, max: 2000 });
-      const msg = pushTicketMessage(t, "user", account.name, text);
-      return { ticket: ticketView(t), message: { id: msg.id, text: msg.text } };
+      // A message can be just an image, so text is only required when nothing is attached.
+      const text = cleanText(rawText, "message", { min: attachments.length ? 0 : 1, max: 2000 });
+      const msg = pushTicketMessage(t, "user", account.name, text, { attachments });
+      return { ticket: ticketView(t), message: { id: msg.id, text: msg.text, attachments: msg.attachments } };
+    },
+
+    // Finds the attachment and checks the person asking is allowed to see it.
+    ticketAttachment(account, ticketId, attachmentId) {
+      const t = mustGetTicket(account, ticketId);
+      for (const m of t.messages) {
+        for (const a of m.attachments || []) if (a.id === attachmentId) return a;
+      }
+      throw new ApiError(404, "attachment_not_found", "Attachment not found");
     },
 
     closeTicket(account, ticketId) {
       const t = mustGetTicket(account, ticketId);
       if (t.status === "open") {
         t.status = "closed";
+        t.closedAt = now();
+        t.closedBy = "customer";
         pushTicketMessage(t, "system", "Valence", "You closed this ticket.");
       }
       return ticketView(t);
     },
 
+    // A plain-text record of the whole conversation, for the customer and for the Discord log.
+    // includeStaffNames is for the owner's copy; the customer's copy shows roles only.
+    transcriptData(ticketOrId, { includeStaffNames = false } = {}) {
+      const t = typeof ticketOrId === "string" ? tickets.get(ticketOrId) : ticketOrId;
+      if (!t) throw new ApiError(404, "ticket_not_found", "Ticket not found");
+      const a = accounts.get(t.accountId);
+      return {
+        id: t.id,
+        number: t.number,
+        subject: t.subject,
+        category: t.category,
+        dealId: t.dealId || null,
+        status: t.status,
+        customer: a ? { name: a.name, kind: a.kind, discord: a.discord ? a.discord.username : null } : { name: "unknown", kind: "human", discord: null },
+        claimedBy: t.claimedBy ? { name: includeStaffNames ? t.claimedBy.name : t.claimedBy.role, role: t.claimedBy.role, at: new Date(t.claimedBy.at).toISOString() } : null,
+        handlers: (t.handlers || []).map((h) => ({ name: includeStaffNames ? h.name : h.role, role: h.role })),
+        openedAt: new Date(t.createdAt).toISOString(),
+        closedAt: t.closedAt ? new Date(t.closedAt).toISOString() : null,
+        closedBy: t.closedBy || null,
+        messages: ticketView(t).messages,
+      };
+    },
+
     // Used by the Discord relay only (no account checks: the caller already holds the ticket).
     ticketForRelay(ticketId) {
       return tickets.get(ticketId) || null;
+    },
+    ticketByChannel(channelId) {
+      for (const t of tickets.values()) if (t.discord && t.discord.channelId === channelId) return t;
+      return null;
     },
     ticketOwnerName(t) {
       const a = accounts.get(t.accountId);
@@ -784,22 +845,96 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     setTicketDiscord(t, patch) {
       t.discord = { ...(t.discord || {}), ...patch };
     },
+    // Staff messages pulled from the ticket's Discord channel.
+    // Each one carries { author, role, text, attachments, discordUserId }. Support agents must
+    // claim the ticket first, so every reply has a name against it; the owner claims by replying.
     addStaffMessages(t, msgs) {
-      let added = 0;
+      const result = { added: 0, needClaim: [] };
       for (const m of msgs) {
-        if (m.text.trim().toLowerCase() === "!close") {
-          if (t.status === "open") {
-            t.status = "closed";
-            pushTicketMessage(t, "system", "Valence", "Support closed this ticket.");
-            added++;
-          }
-          continue;
-        }
         if (t.status !== "open") continue;
-        pushTicketMessage(t, "staff", m.author || "Support", m.text.slice(0, 4000));
-        added++;
+        const text = String(m.text || "").slice(0, 4000);
+        if (!text.trim() && !(m.attachments || []).length) continue;
+        if (!t.claimedBy) {
+          if (m.role !== "Owner") {
+            if (!result.needClaim.some((x) => x.discordUserId === m.discordUserId)) result.needClaim.push(m);
+            continue; // not relayed: the agent has to claim first
+          }
+          claim(t, m); // the owner claims by replying
+        }
+        pushTicketMessage(t, "staff", m.role || m.author || "Support", text, { attachments: m.attachments || [], staffId: m.discordUserId });
+        noteHandler(t, m);
+        result.added++;
       }
-      return added;
+      return result;
+    },
+
+    claimTicket(t, who) {
+      if (t.status !== "open") return { ok: false, reason: "This ticket is already closed." };
+      if (t.claimedBy && t.claimedBy.discordUserId !== who.discordUserId) {
+        return { ok: false, reason: `Already claimed by ${t.claimedBy.name}.`, claimedBy: t.claimedBy };
+      }
+      claim(t, who);
+      return { ok: true, claimedBy: t.claimedBy };
+    },
+
+    releaseTicket(t) {
+      if (!t.claimedBy) return { ok: false, reason: "Nobody has claimed this ticket." };
+      const was = t.claimedBy;
+      t.claimedBy = null;
+      pushTicketMessage(t, "system", "Valence", "Support handed this ticket back to the queue.");
+      return { ok: true, was };
+    },
+
+    closeTicketByStaff(t, who, reason) {
+      if (t.status !== "open") return { ok: false, reason: "This ticket is already closed." };
+      if (who && !t.claimedBy) claim(t, who);
+      t.status = "closed";
+      t.closedAt = now();
+      t.closedBy = who ? `${who.role || "Support"} (${who.author})` : "support";
+      if (who) noteHandler(t, who);
+      pushTicketMessage(t, "system", "Valence", reason ? `Support closed this ticket: ${reason}` : "Support closed this ticket.");
+      return { ok: true };
+    },
+
+    // ---- linking a Discord account ----
+    startDiscordLink(account) {
+      if (account.discord) throw new ApiError(409, "already_linked", "This account is already linked to a Discord account");
+      for (const [code, link] of discordLinks) if (link.accountId === account.id) discordLinks.delete(code);
+      if (discordLinks.size >= MAX_LINK_CODES) discordLinks.delete(discordLinks.keys().next().value);
+      let code;
+      do code = newInviteCode(); while (discordLinks.has(code));
+      discordLinks.set(code, { accountId: account.id, expiresAt: now() + LINK_CODE_TTL_MS });
+      return { code, expiresAt: new Date(now() + LINK_CODE_TTL_MS).toISOString() };
+    },
+
+    // Called from the /link slash command. Returns a plain result; the bot shows it to the user.
+    completeDiscordLink(rawCode, discordUser) {
+      const code = String(rawCode || "").trim().toUpperCase().replace(/\s+/g, "");
+      const link = discordLinks.get(code);
+      if (!link || link.expiresAt <= now()) {
+        discordLinks.delete(code);
+        return { ok: false, reason: "That code isn't valid or has expired. Get a fresh one from Settings on the website." };
+      }
+      const account = accounts.get(link.accountId);
+      if (!account) return { ok: false, reason: "That account no longer exists." };
+      for (const other of accounts.values()) {
+        if (other !== account && other.discord && other.discord.id === discordUser.id) {
+          return { ok: false, reason: "That Discord account is already linked to another Valence account." };
+        }
+      }
+      account.discord = { id: discordUser.id, username: discordUser.username, linkedAt: now() };
+      discordLinks.delete(code);
+      return { ok: true, accountName: account.name };
+    },
+
+    unlinkDiscord(account) {
+      account.discord = null;
+      return { ok: true };
+    },
+
+    discordIdFor(t) {
+      const a = accounts.get(t.accountId);
+      return a && a.discord ? a.discord.id : null;
     },
 
     // Whole-store snapshot for durable storage (see persist.js). Lookup maps are rebuilt on import.

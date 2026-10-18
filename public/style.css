@@ -591,3 +591,21 @@ details.more summary { cursor: pointer; color: var(--muted); font-weight: 500; p
   .setup-body { grid-template-columns: 1fr; }
   .tfa-row .actions, .tfa-row > .hint, .tfa-row > .gate, .tfa-row > .setup { margin-left: 0; }
 }
+
+/* attachments and transcripts */
+.attach-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.attach-bar .btn { margin: 0; }
+.chips.files { gap: 6px; margin: 0; }
+.file-chip { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line-2); border-radius: 999px; padding: 4px 6px 4px 12px; font-size: .85rem; color: var(--muted); max-width: 220px; }
+.file-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip button { border: 0; background: var(--btn2); color: var(--fg); width: 20px; height: 20px; border-radius: 50%; cursor: pointer; font: inherit; line-height: 1; flex: none; }
+.file-chip button:hover { background: var(--bad); color: var(--accent-ink); }
+.shots { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.shot { padding: 0; border: 1px solid var(--line-2); background: var(--bg-2); border-radius: 10px; overflow: hidden; cursor: zoom-in; line-height: 0; }
+.shot img { width: 150px; height: 110px; object-fit: cover; display: block; }
+.bubble.user .shot { border-color: rgba(255, 255, 255, .35); }
+.lightbox { position: fixed; inset: 0; z-index: 60; background: rgba(2, 5, 12, .88); display: grid; place-items: center; padding: 28px; cursor: zoom-out; }
+.lightbox img { max-width: 100%; max-height: 100%; border-radius: var(--r); }
+.discord-card.subtle { background: var(--surface); border-color: var(--line); }
+.discord-card.subtle .page-ico { background: var(--accent-soft); color: var(--accent); }
+.composer { align-items: flex-end; }

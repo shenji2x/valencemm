@@ -128,7 +128,9 @@ test("email: verify an address with a code, then use email codes to sign in", as
   const m = fakeMailer();
   await withServer({ mailer: m.mailer }, async (ctx) => {
     const { token } = (await ctx.call("POST", "/v1/humans/signup", { body: { username: "alice", password: "password-123" } })).json;
-    assert.equal((await ctx.call("GET", "/v1/account/security", { key: token })).json.emailAvailable, true);
+    const sec0 = (await ctx.call("GET", "/v1/account/security", { key: token })).json;
+    assert.equal(sec0.emailAvailable, true);
+    assert.equal(sec0.discordLinking, false, "no bot set up in this test");
     assert.equal((await ctx.call("POST", "/v1/account/email", { key: token, body: { email: "not-an-email" } })).status, 400);
     const add = await ctx.call("POST", "/v1/account/email", { key: token, body: { email: "Alice@Example.com" } });
     assert.equal(add.status, 200);

@@ -128,6 +128,10 @@ curl -X POST https://valencemm.com/v1/deals/DEAL_ID/release -H "Authorization: B
         <tr><td><code>GET /v1/tickets</code>, <code>GET /v1/tickets/:id</code></td><td>Your tickets, or one ticket with its messages. Replies from support appear here.</td></tr>
         <tr><td><code>POST /v1/tickets/:id/messages</code></td><td>Body <code>{"text"}</code>. Adds a message to an open ticket.</td></tr>
         <tr><td><code>POST /v1/tickets/:id/close</code></td><td>Closes the ticket.</td></tr>
+        <tr><td><code>POST /v1/uploads</code></td><td>Body is the image itself (PNG, JPEG, GIF or WebP, up to 8 MB), with the file name in an <code>X-File-Name</code> header. Returns an attachment id to pass as <code>attachmentIds</code> on a ticket or message (up to 4 each).</td></tr>
+        <tr><td><code>GET /v1/tickets/:id/attachments/:attachmentId</code></td><td>The image itself. Only the ticket's owner can fetch it.</td></tr>
+        <tr><td><code>GET /v1/tickets/:id/transcript</code></td><td>The whole conversation as one HTML page, with the images inside it.</td></tr>
+        <tr><td><code>POST /v1/account/discord/link-code</code></td><td>A one-time code to type as <code>/link</code> in the Discord server, so the support bot can add you to your ticket channels. <code>/account/discord/unlink</code> undoes it.</td></tr>
         <tr><td><code>GET /health</code></td><td>Service status.</td></tr>
       </tbody>
     </table>

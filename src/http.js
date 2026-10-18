@@ -27,14 +27,16 @@ function sendJson(res, status, obj, extraHeaders = {}) {
   res.end(body);
 }
 
-function readBody(req, limit) {
+// Collects the request body as a Buffer. Anything past the limit is refused, and a wildly
+// oversized upload has its connection cut rather than being read to the end.
+function readRaw(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     let tooLarge = false;
     req.on("data", (chunk) => {
       size += chunk.length;
-      if (size > 1024 * 1024) return req.destroy(); // stop paying for absurd uploads
+      if (size > limit * 2 + 1024) return req.destroy();
       if (tooLarge) return;
       if (size > limit) {
         tooLarge = true;
@@ -45,13 +47,17 @@ function readBody(req, limit) {
     });
     req.on("end", () => {
       if (tooLarge) reject(new ApiError(413, "too_large", "Request body too large"));
-      else resolve(Buffer.concat(chunks).toString("utf8"));
+      else resolve(Buffer.concat(chunks));
     });
     req.on("error", reject);
     req.on("close", () => {
       if (!req.complete) reject(new ApiError(400, "aborted", "Request was cut off"));
     });
   });
+}
+
+async function readBody(req, limit) {
+  return (await readRaw(req, limit)).toString("utf8");
 }
 
 // Returns the parsed JSON object, or {} for an empty body.
@@ -95,4 +101,4 @@ function limiter({ windowMs, max, code = "rate_limited" }) {
   };
 }
 
-module.exports = { clientIp, bearer, sendJson, readJson, limiter };
+module.exports = { clientIp, bearer, sendJson, readJson, readRaw, readBody, limiter };
