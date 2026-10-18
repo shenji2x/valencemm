@@ -118,6 +118,15 @@ function createApi(store, opts = {}) {
     }
 
     const result = await r.handler({ account, token, params, body });
+    // Every POST changes something. Don't answer until it's saved, so a success response
+    // always means the change survives a restart.
+    if (req.method === "POST" && opts.persistence) {
+      try {
+        await opts.persistence.commit();
+      } catch {
+        throw new ApiError(503, "storage_unavailable", "Couldn't save the change. Please try again in a moment.");
+      }
+    }
     const status = result.status || 200;
     if (cacheKey) {
       idempotencyCache.set(cacheKey, { status, body: result.body });

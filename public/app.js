@@ -117,18 +117,131 @@
     );
   }
 
-  // ---------- login page ----------
-  function loginPage() {
+  // ---------- theme ----------
+  const THEME_KEY = "valence_theme";
+  const THEME_COLORS = { dark: "#0c1a17", light: "#edf0e8" };
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute("content", THEME_COLORS[theme]);
+    const btn = $("#theme-toggle");
+    if (btn) btn.setAttribute("aria-label", theme === "dark" ? "Switch to light theme" : "Switch to dark theme");
+  }
+
+  function setupTheme() {
+    applyTheme(document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark");
+    const btn = $("#theme-toggle");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+      applyTheme(next);
+      try { localStorage.setItem(THEME_KEY, next); } catch { /* storage blocked */ }
+    });
+  }
+
+  // ---------- motion: Lenis smooth scroll + GSAP ----------
+  const reducedMotion = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let lenis = null;
+
+  function setupScroll() {
+    // Close the mobile menu after picking a link, so it doesn't sit over the section you jumped to.
+    for (const a of document.querySelectorAll(".menu-panel a")) {
+      a.addEventListener("click", () => { const d = a.closest("details"); if (d) d.open = false; });
+    }
+    if (reducedMotion() || typeof window.Lenis !== "function") return;
+    const gsap = window.gsap;
+    lenis = new window.Lenis({ duration: 1.1, anchors: { offset: -84 }, autoRaf: !gsap });
+    if (gsap) {
+      if (window.ScrollTrigger) {
+        gsap.registerPlugin(window.ScrollTrigger);
+        lenis.on("scroll", window.ScrollTrigger.update);
+      }
+      gsap.ticker.add((t) => lenis.raf(t * 1000));
+      gsap.ticker.lagSmoothing(0);
+    }
+  }
+
+  // The hero card plays one deal from creation to escrow. Without JS, or with reduced
+  // motion, it simply shows the finished "in escrow" state that's in the HTML.
+  function heroBond() {
+    const gsap = window.gsap;
+    const root = $("#bond");
+    if (!root || !gsap || reducedMotion()) return;
+    const badge = $("#bond-badge");
+    const steps = [...$("#bond-track").children];
+    const amount = $("#bond-amount");
+    const linkA = $("#bond-a");
+    const linkB = $("#bond-b");
+    const token = $("#bond-token");
+    const receiver = $("#bond-receiver");
+    const replay = $("#bond-replay");
+    const STAGES = [["open", "Waiting for the other side"], ["joined", "Ready to fund"], ["funded", "In escrow"]];
+    const counter = { v: 0 };
+
+    function stage(i) {
+      badge.className = "badge " + STAGES[i][0];
+      badge.textContent = STAGES[i][1];
+      steps.forEach((li, n) => { li.className = n < i ? "done" : n === i ? "now" : ""; });
+    }
+    function reset() {
+      stage(0);
+      counter.v = 0;
+      amount.textContent = "0";
+      gsap.set([linkA, linkB], { strokeDasharray: 86, strokeDashoffset: 86 });
+      gsap.set(receiver, { opacity: 0.25 });
+      gsap.set(token, { attr: { r: 0, cx: 55 } });
+    }
+
+    const tl = gsap.timeline({ paused: true, defaults: { ease: "power2.out" }, onComplete: () => { replay.hidden = false; } })
+      .to({}, { duration: 0.6 })
+      .call(() => stage(1))
+      .to(receiver, { opacity: 1, duration: 0.5 })
+      .to(linkB, { strokeDashoffset: 0, duration: 0.6 }, "<")
+      .to({}, { duration: 0.5 })
+      .call(() => stage(2))
+      .set(token, { attr: { r: 7 } })
+      .to(linkA, { strokeDashoffset: 0, duration: 0.6 })
+      .to(token, { attr: { cx: 220 }, duration: 0.9, ease: "power2.inOut" }, "<")
+      .to(counter, { v: 250, duration: 0.9, ease: "power1.out", onUpdate: () => { amount.textContent = String(Math.round(counter.v)); } }, "<0.2")
+      .to(token, { attr: { r: 0 }, duration: 0.3 });
+
+    reset();
+    tl.play();
+    replay.addEventListener("click", () => {
+      replay.hidden = true;
+      reset();
+      tl.restart();
+    });
+  }
+
+  // "How it works" is a real sequence: the brass rule fills as you scroll through the four steps.
+  function stepsRule() {
+    const gsap = window.gsap;
+    const fill = $("#steps-fill");
+    if (!fill || !gsap || !window.ScrollTrigger || reducedMotion()) return;
+    gsap.fromTo(fill, { scaleX: 0 }, {
+      scaleX: 1,
+      ease: "none",
+      scrollTrigger: { trigger: ".steps-wrap", start: "top 85%", end: "bottom 55%", scrub: 0.6 },
+    });
+  }
+
+  // ---------- login and signup pages ----------
+  function authDone() {
     const next = safeNext(new URLSearchParams(location.search).get("next")) || "/dashboard";
-    const done = (token) => {
+    // The "Already have an account?" / "Don't have an account?" links keep where you were headed.
+    for (const a of document.querySelectorAll("a[data-keep-next]")) {
+      if (next !== "/dashboard") a.href = a.getAttribute("href") + "?next=" + encodeURIComponent(next);
+    }
+    return (token) => {
       setToken(token);
       location.href = next;
     };
+  }
 
-    bindForm("#login-form", async (f) => {
-      const r = await api("POST", "/humans/login", { username: val(f, "username"), password: val(f, "password") }, { noRedirect: true });
-      done(r.token);
-    });
+  function signupPage() {
+    const done = authDone();
     bindForm("#signup-form", async (f) => {
       const r = await api("POST", "/humans/signup", { username: val(f, "username"), password: val(f, "password") }, { noRedirect: true });
       done(r.token);
@@ -138,6 +251,14 @@
       $("#agent-key").textContent = r.apiKey;
       $("#agent-created").hidden = false;
       $("#agent-continue").onclick = () => done(r.apiKey);
+    });
+  }
+
+  function loginPage() {
+    const done = authDone();
+    bindForm("#login-form", async (f) => {
+      const r = await api("POST", "/humans/login", { username: val(f, "username"), password: val(f, "password") }, { noRedirect: true });
+      done(r.token);
     });
     bindForm("#agent-key-form", async (f) => {
       const key = val(f, "apikey").trim();
@@ -177,7 +298,8 @@
     const code = new URLSearchParams(location.search).get("code");
     if (code) {
       $("#join-form").elements.code.value = code;
-      $("#join-card").scrollIntoView();
+      if (lenis) lenis.scrollTo("#join-card", { offset: -84 });
+      else $("#join-card").scrollIntoView();
     }
 
     bindForm("#redeem-form", async (f) => {
@@ -295,7 +417,7 @@
         el("div", { class: "row between" },
           el("h1", {}, deal.title),
           el("span", { class: "badge " + deal.state }, STATE_LABELS[deal.state])),
-        deal.description ? el("p", { class: "muted" }, deal.description) : null,
+        ...(deal.description ? [el("p", { class: "muted" }, deal.description)] : []),
         el("p", {}, nextStep()),
         el("dl", { class: "facts" },
           el("dt", {}, "Deal type"), el("dd", {}, TYPE_LABELS[deal.type]),
@@ -359,9 +481,13 @@
   }
 
   // ---------- start ----------
+  setupTheme();
   renderNav();
+  setupScroll();
   const page = document.body.dataset.page;
-  if (page === "login") loginPage();
+  if (page === "home") { heroBond(); stepsRule(); }
+  else if (page === "login") loginPage();
+  else if (page === "signup") signupPage();
   else if (page === "dashboard") dashboardPage();
   else if (page === "deal") dealPage();
 })();

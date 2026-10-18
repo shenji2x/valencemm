@@ -4,6 +4,7 @@ const path = require("path");
 const { createStore, parseTestCodes } = require("./store");
 const { createApi } = require("./api");
 const { sendJson } = require("./http");
+const { createPersistence, backendFromEnv } = require("./persist");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const CONTENT_TYPES = {
@@ -16,8 +17,10 @@ const CONTENT_TYPES = {
   ".ico": "image/x-icon",
   ".xml": "application/xml; charset=utf-8",
   ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
 };
-const LONG_CACHE = new Set([".png", ".ico", ".svg"]); // images rarely change
+const LONG_CACHE = new Set([".png", ".ico", ".svg", ".woff", ".woff2"]); // images and fonts rarely change
 
 // Extra domains that should land on the main one. A permanent redirect keeps search
 // engines from seeing duplicate copies of the site, so everything ranks under one name.
@@ -27,16 +30,22 @@ const REDIRECT_HOSTS = new Set(
     .split(",").map((h) => h.trim().toLowerCase()).filter(Boolean)
 );
 
-// Reads everything in public/ once at startup. index.html is served at "/", and
-// other pages without their extension (docs.html -> /docs).
-function loadStatic() {
-  const files = new Map();
-  for (const name of fs.readdirSync(PUBLIC_DIR)) {
+// Reads everything in public/ (and its subfolders, e.g. vendor/ and fonts/) once at startup.
+// index.html is served at "/", and top-level pages without their extension (docs.html -> /docs).
+function loadStatic(dir = PUBLIC_DIR, prefix = "/", files = new Map()) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const name = entry.name;
+    if (name.startsWith(".")) continue;
+    if (entry.isDirectory()) {
+      loadStatic(path.join(dir, name), prefix + name + "/", files);
+      continue;
+    }
     const ext = path.extname(name);
     const type = CONTENT_TYPES[ext];
     if (!type) continue;
-    const body = fs.readFileSync(path.join(PUBLIC_DIR, name));
-    const urlPath = name === "index.html" ? "/" : ext === ".html" ? "/" + name.slice(0, -5) : "/" + name;
+    const body = fs.readFileSync(path.join(dir, name));
+    const isPage = ext === ".html" && prefix === "/";
+    const urlPath = isPage && name === "index.html" ? "/" : isPage ? "/" + name.slice(0, -5) : prefix + name;
     files.set(urlPath, { body, type, cache: LONG_CACHE.has(ext) ? "public, max-age=86400" : "no-cache" });
   }
   return files;
@@ -48,7 +57,7 @@ const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "Strict-Transport-Security": "max-age=15552000",
   "Content-Security-Policy":
-    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; " +
+    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; " +
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
@@ -68,7 +77,8 @@ function sendError(res, err, isApi) {
 function createApp(opts = {}) {
   const testCodes = opts.testCodes || parseTestCodes(process.env.TEST_CREDIT_CODES);
   const store = createStore({ now: opts.now, testCodes });
-  const handleApi = createApi(store, opts);
+  const persistence = createPersistence(store, opts.backend || backendFromEnv(), { onFatal: opts.onFatal });
+  const handleApi = createApi(store, { ...opts, persistence });
   const statics = loadStatic();
 
   async function handle(req, res) {
@@ -105,6 +115,7 @@ function createApp(opts = {}) {
         status: "online",
         mode: "play-credits",
         testCredits: testCodes.size > 0,
+        storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
         ledger: store.audit().ok ? "balanced" : "UNBALANCED",
       });
     }
@@ -124,6 +135,9 @@ function createApp(opts = {}) {
   server.headersTimeout = 20 * 1000;
   server.requestTimeout = 30 * 1000;
   server.store = store;
+  server.persistence = persistence;
+  // Load the saved snapshot before taking traffic. server.js waits for this.
+  server.ready = persistence.load();
   server.testCodesEnabled = testCodes.size > 0;
   return server;
 }

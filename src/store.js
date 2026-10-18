@@ -1,6 +1,6 @@
-// In-memory store for the Valence prototype. PLAY CREDITS ONLY, no real money.
-// Everything here is lost when the server restarts or scales to zero.
-// A real database comes later; the method names here are the seam to swap it in.
+// Store for the Valence prototype. PLAY CREDITS ONLY, no real money.
+// The working copy lives in memory; persist.js saves a snapshot to durable storage after
+// every change (Cloud Storage in production) and loads it back on startup.
 
 const crypto = require("crypto");
 const { promisify } = require("util");
@@ -22,6 +22,7 @@ const HOUR_MS = 3600 * 1000;
 const DEAL_TYPES = ["ai-ai", "ai-human", "human-human"];
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
 const OPEN_STATES = new Set(["open", "joined", "funded"]);
+const SNAPSHOT_SCHEMA = 1;
 
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const sha256Buf = (s) => crypto.createHash("sha256").update(s).digest();
@@ -370,6 +371,46 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       dealsByInvite.delete(deal.inviteCode);
       setState(deal, "cancelled", account.id);
       return view(deal, account.id);
+    },
+
+    // Whole-store snapshot for durable storage (see persist.js). Lookup maps are rebuilt on import.
+    exportState() {
+      return {
+        schema: SNAPSHOT_SCHEMA,
+        savedAt: new Date(now()).toISOString(),
+        minted,
+        platformBalance: platform.balance,
+        accounts: [...accounts.values()].map((a) => ({
+          ...a,
+          salt: a.salt ? a.salt.toString("hex") : undefined,
+          hash: a.hash ? a.hash.toString("hex") : undefined,
+        })),
+        sessions: [...sessions.entries()],
+        deals: [...deals.values()],
+        ledger,
+      };
+    },
+
+    importState(state) {
+      if (!state || state.schema !== SNAPSHOT_SCHEMA) throw new Error("Unknown snapshot schema: " + (state && state.schema));
+      if (accounts.size || deals.size) throw new Error("importState needs an empty store");
+      for (const raw of state.accounts) {
+        const a = { ...raw };
+        if (a.salt) a.salt = Buffer.from(a.salt, "hex");
+        if (a.hash) a.hash = Buffer.from(a.hash, "hex");
+        accounts.set(a.id, a);
+        if (a.kind === "agent") byKeyHash.set(a.keyHash, a);
+        if (a.kind === "human") byUsername.set(a.username, a);
+      }
+      const t = now();
+      for (const [h, s] of state.sessions) if (s.expiresAt > t) sessions.set(h, s);
+      for (const d of state.deals) {
+        deals.set(d.id, d);
+        if (d.state === "open") dealsByInvite.set(d.inviteCode, d.id); // invites are only live while a deal is open
+      }
+      ledger.push(...state.ledger);
+      platform.balance = state.platformBalance;
+      minted = state.minted;
     },
 
     // Credits are only ever created by welcome grants and test codes, and never lost after that.

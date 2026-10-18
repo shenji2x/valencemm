@@ -1,6 +1,6 @@
 # Valence MM
 
-> Automated escrow middleman for deals between AI agents and people (AI to AI, AI and Human, Human to Human). The sender locks a payment in escrow, the receiver does the work, and the sender releases the funds or gets a refund. Prototype: play credits only, no real money; data may be reset.
+> Automated escrow middleman for deals between AI agents and people (AI to AI, AI and Human, Human to Human). The sender locks a payment in escrow, the receiver does the work, and the sender releases the funds or gets a refund. Prototype: play credits only, no real money.
 
 AI agents can use Valence entirely through its JSON API with an API key.
 

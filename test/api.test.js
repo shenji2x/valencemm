@@ -203,7 +203,7 @@ test("rate limits: registration, login and joins", async () => {
 });
 
 test("pages, security headers and no leaked secrets", () => withServer(async (ctx) => {
-  for (const [path, needle] of [["/", "Create deal"], ["/docs", "Idempotency-Key"], ["/login", "Sign up"], ["/dashboard", "Create a deal"], ["/deal", "Loading"]]) {
+  for (const [path, needle] of [["/", "Create a deal"], ["/docs", "Idempotency-Key"], ["/login", "Don't have an account\\? <a href=\"/signup\""], ["/signup", "Already have an account\\? <a href=\"/login\""], ["/dashboard", "Create a deal"], ["/deal", "Loading"]]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
     assert.match(r.text, new RegExp(needle), path);
@@ -225,7 +225,12 @@ test("pages, security headers and no leaked secrets", () => withServer(async (ct
   assert.equal((await ctx.call("POST", "/docs", { body: {} })).status, 405);
   assert.equal(home.headers.get("x-powered-by"), null);
   // no inline scripts or styles anywhere, which is what the CSP relies on
-  for (const p of ["/", "/docs", "/login", "/dashboard", "/deal"]) {
+  for (const p of ["/", "/docs", "/login", "/signup", "/dashboard", "/deal"]) {
+    const t0 = (await ctx.call("GET", p)).text;
+    assert.ok(t0.includes('id="theme-toggle"'), p + " is missing the theme toggle");
+    assert.ok(t0.indexOf('src="/theme.js"') < t0.indexOf("</head>"), p + " must load theme.js in <head>");
+  }
+  for (const p of ["/", "/docs", "/login", "/signup", "/dashboard", "/deal"]) {
     const t = (await ctx.call("GET", p)).text;
     assert.equal(/<script(?![^>]*\bsrc=)/i.test(t), false, p + " has an inline script");
     assert.equal(/<style/i.test(t), false, p + " has an inline style block");
@@ -288,4 +293,21 @@ test("logo, icons, manifest and SEO files are served with the right types", () =
   }
   assert.ok((await ctx.call("GET", "/dashboard")).text.includes('name="robots" content="noindex"'));
   assert.match((await ctx.call("GET", "/")).headers.get("content-security-policy"), /manifest-src 'self'/);
+}));
+
+test("vendored GSAP, Lenis and self-hosted fonts are served from our own origin", () => withServer(async (ctx) => {
+  for (const path of ["/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js", "/vendor/lenis.min.js", "/theme.js"]) {
+    const r = await ctx.call("GET", path);
+    assert.equal(r.status, 200, path);
+    assert.match(r.headers.get("content-type"), /javascript/, path);
+  }
+  for (const path of ["/fonts/bricolage-grotesque.woff", "/fonts/hanken-grotesk.woff", "/fonts/ibm-plex-mono-400.woff"]) {
+    const r = await ctx.call("GET", path);
+    assert.equal(r.status, 200, path);
+    assert.match(r.headers.get("content-type"), /font\/woff/, path);
+  }
+  assert.match((await ctx.call("GET", "/")).headers.get("content-security-policy"), /font-src 'self'/);
+  // subfolder pages are not exposed without their extension, and folders aren't listed
+  assert.equal((await ctx.call("GET", "/vendor")).status, 404);
+  assert.equal((await ctx.call("GET", "/vendor/lenis.min")).status, 404);
 }));
