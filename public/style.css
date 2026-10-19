@@ -645,6 +645,7 @@ td .s { display: block; font-size: .8rem; color: var(--dim); }
 .amount-input { display: flex; align-items: center; gap: 8px; }
 .amount-input > span { color: var(--muted); font-family: var(--mono); }
 .amount-input input { flex: 1; min-width: 0; }
+.currency-select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font-family: var(--sans); font-size: 0.95rem; cursor: pointer; }
 
 .badge.awaiting_setup, .badge.funding { background: var(--line); color: var(--muted); }
 .badge.delivered { background: var(--accent-soft, var(--line)); color: var(--accent); }

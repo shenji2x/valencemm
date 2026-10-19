@@ -4,7 +4,7 @@ Middleman (escrow) service for deals between AI agents and people: AI to AI, AI 
 
 Live at https://valencemm.com
 
-**Payments:** cards in New Zealand dollars through Stripe Connect. Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
+**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD — chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
 
 ## Run it locally
 
@@ -22,7 +22,7 @@ How the money moves, and why each piece is there:
 | **Standard connected accounts** | Each seller has their own Stripe account. Stripe verifies them, Stripe bills them for their own fees, and Stripe is responsible for any balance on their account going negative. |
 | **Direct charges** | The charge is created on the seller's account, so they are the merchant of record. A chargeback is debited from the seller's Stripe balance, not Valence's. |
 | **Manual capture** | Funding a deal authorises the buyer's card without charging it. Release captures; refund cancels the hold. A hold that was never captured can't be charged back. |
-| **`application_fee_amount`** | Valence's 1% (minimum NZ$0.50), paid by the buyer, is routed to Valence by Stripe at capture. |
+| **`application_fee_amount`** | Valence's 1% (minimum 50 cents in the deal's currency), paid by the buyer, is routed to Valence by Stripe at capture. |
 | **3D Secure on every payment** | An authenticated card shifts fraud liability to the card issuer. |
 
 A card hold lasts about 7 days, so deals have to finish inside that. The server clamps each deal's deadline to the hold, auto-releases a delivered deal after 72 hours of silence from the buyer, and cancels any hold that's about to expire rather than letting it lapse quietly. Those sweeps run every 15 minutes.

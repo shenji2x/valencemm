@@ -10,25 +10,80 @@
 //   processing fee, exactly as any merchant does. That means the seller's quoted price is
 //   the amount the buyer agrees to, and the only deduction the seller sees is the processor's.
 //
-// Card rates are Stripe's published New Zealand prices. They depend on the card the buyer
-// actually uses, which we don't know until they pay, so the seller's side is an estimate and
-// is always labelled as one.
+// Card rates are Stripe's published standard pricing per region. They depend on the card the
+// buyer actually uses, which we don't know until they pay, so the seller's side is an estimate
+// and is always labelled as one.
 
 const CURRENCIES = {
+  usd: {
+    code: "usd",
+    label: "USD",
+    symbol: "$",
+    minor: 100,
+    // Stripe US standard pricing.
+    card: {
+      domestic: { bps: 290, fixed: 30 },
+      international: { bps: 390, fixed: 30 },
+    },
+  },
+  aud: {
+    code: "aud",
+    label: "AUD",
+    symbol: "A$",
+    minor: 100,
+    // Stripe Australia standard pricing.
+    card: {
+      domestic: { bps: 170, fixed: 30 },
+      international: { bps: 370, fixed: 30 },
+    },
+  },
   nzd: {
     code: "nzd",
     label: "NZD",
     symbol: "NZ$",
     minor: 100,
-    // Stripe New Zealand, standard pricing, charged to the merchant of record (the seller).
+    // Stripe New Zealand standard pricing.
     card: {
       domestic: { bps: 270, fixed: 30 },
       international: { bps: 370, fixed: 30 },
     },
   },
+  gbp: {
+    code: "gbp",
+    label: "GBP",
+    symbol: "£",
+    minor: 100,
+    // Stripe UK standard pricing.
+    card: {
+      domestic: { bps: 150, fixed: 20 },
+      international: { bps: 250, fixed: 20 },
+    },
+  },
+  eur: {
+    code: "eur",
+    label: "EUR",
+    symbol: "€",
+    minor: 100,
+    // Stripe Europe standard pricing.
+    card: {
+      domestic: { bps: 150, fixed: 25 },
+      international: { bps: 250, fixed: 25 },
+    },
+  },
+  cad: {
+    code: "cad",
+    label: "CAD",
+    symbol: "CA$",
+    minor: 100,
+    // Stripe Canada standard pricing.
+    card: {
+      domestic: { bps: 290, fixed: 30 },
+      international: { bps: 390, fixed: 30 },
+    },
+  },
 };
 
-const DEFAULT_CURRENCY = "nzd";
+const DEFAULT_CURRENCY = "usd";
 
 // Valence's commission: 1% of the deal, with a floor so tiny deals still cover their support cost.
 const PLATFORM_BPS = 100;
@@ -41,8 +96,8 @@ const HOLD_MS = HOLD_DAYS * 24 * 3600 * 1000;
 // Leave a margin so we are never racing the network's expiry when a buyer releases late.
 const HOLD_SAFETY_MS = 6 * 3600 * 1000;
 
-const MIN_AMOUNT = 500; // NZ$5.00
-const MAX_AMOUNT = 2000000; // NZ$20,000.00
+const MIN_AMOUNT = 500; // $5.00 in any supported currency
+const MAX_AMOUNT = 2000000; // $20,000.00 in any supported currency
 
 function currency(code) {
   const c = CURRENCIES[String(code || DEFAULT_CURRENCY).toLowerCase()];
@@ -97,13 +152,13 @@ function format(amount, code = DEFAULT_CURRENCY) {
   const abs = Math.abs(amount);
   const whole = Math.floor(abs / c.minor);
   const part = String(abs % c.minor).padStart(String(c.minor - 1).length, "0");
-  return `${sign}${c.symbol}${whole.toLocaleString("en-NZ")}.${part}`;
+  return `${sign}${c.symbol}${whole.toLocaleString("en")}.${part}`;
 }
 
 // Accepts "12.34", "12", 12.34 (dollars) and returns minor units, or null if it isn't a price.
 function parseAmount(input, code = DEFAULT_CURRENCY) {
   const c = currency(code);
-  const text = typeof input === "number" ? input.toFixed(2) : String(input == null ? "" : input).trim().replace(/[,\s]|^\$|^NZ\$/g, "");
+  const text = typeof input === "number" ? input.toFixed(2) : String(input == null ? "" : input).trim().replace(/[,\s]|^[A-Z]*\$/g, "");
   if (!/^\d{1,9}(\.\d{1,2})?$/.test(text)) return null;
   const [whole, part = ""] = text.split(".");
   return Number(whole) * c.minor + Number(part.padEnd(String(c.minor - 1).length, "0"));

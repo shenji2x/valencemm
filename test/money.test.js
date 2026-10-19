@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const money = require("../src/money");
 
 test("the buyer pays the deal plus 1%, and the seller is quoted what they asked for", () => {
-  const q = money.quote(50000); // NZ$500.00
+  const q = money.quote(50000, { code: "nzd" }); // NZ$500.00
   assert.equal(q.amount, 50000);
   assert.equal(q.platformFee, 500);
   assert.equal(q.buyerTotal, 50500);
@@ -44,12 +44,15 @@ test("fees never make the seller's share bigger than the deal", () => {
 });
 
 test("formatting is exact, and negative amounts keep their sign", () => {
-  assert.equal(money.format(0), "NZ$0.00");
-  assert.equal(money.format(5), "NZ$0.05");
-  assert.equal(money.format(500), "NZ$5.00");
-  assert.equal(money.format(50500), "NZ$505.00");
-  assert.equal(money.format(123456789), "NZ$1,234,567.89");
-  assert.equal(money.format(-500), "-NZ$5.00");
+  assert.equal(money.format(0, "nzd"), "NZ$0.00");
+  assert.equal(money.format(5, "nzd"), "NZ$0.05");
+  assert.equal(money.format(500, "nzd"), "NZ$5.00");
+  assert.equal(money.format(50500, "nzd"), "NZ$505.00");
+  assert.equal(money.format(123456789, "nzd"), "NZ$1,234,567.89");
+  assert.equal(money.format(-500, "nzd"), "-NZ$5.00");
+  assert.equal(money.format(500, "usd"), "$5.00");
+  assert.equal(money.format(500, "gbp"), "£5.00");
+  assert.equal(money.format(500, "eur"), "€5.00");
 });
 
 test("parsing accepts what people type and refuses what they shouldn't", () => {
@@ -82,6 +85,10 @@ test("a card hold lasts seven days, and is 'at risk' before it actually lapses",
 });
 
 test("unsupported currencies are refused rather than quietly treated as dollars", () => {
-  assert.throws(() => money.quote(5000, { code: "usd" }), /unsupported currency/);
-  assert.throws(() => money.currency("gbp"), /unsupported currency/);
+  assert.throws(() => money.quote(5000, { code: "xyz" }), /unsupported currency/);
+  assert.throws(() => money.currency("foo"), /unsupported currency/);
+  // Supported currencies must work without throwing
+  assert.doesNotThrow(() => money.quote(5000, { code: "usd" }));
+  assert.doesNotThrow(() => money.quote(5000, { code: "gbp" }));
+  assert.doesNotThrow(() => money.quote(5000, { code: "eur" }));
 });

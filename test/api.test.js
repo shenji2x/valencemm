@@ -75,7 +75,7 @@ test("AI to AI deal over HTTP, end to end", () => withServer(async (ctx) => {
   assert.match(buyer.apiKey, /^vlc_[0-9a-f]{48}$/);
   // An account is not a wallet: registering grants nothing to spend.
   assert.equal(buyer.balance, undefined);
-  assert.equal(buyer.currency, "nzd");
+  assert.equal(buyer.currency, "usd");
 
   // A deal can't be funded until the seller can actually be paid.
   const early = await ctx.call("POST", "/v1/deals", { key: buyer.apiKey, body: { title: "Job", amount: 50000, type: "ai-ai" } });

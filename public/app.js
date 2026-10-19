@@ -23,13 +23,21 @@
 
   // Mirrors src/money.js. These are for previews and for enabling buttons; the server prices
   // every real charge and never trusts an amount the browser sends.
-  const MIN_AMOUNT = 500;      // NZ$5.00
-  const MAX_AMOUNT = 2000000;  // NZ$20,000.00
+  const MIN_AMOUNT = 500;
+  const MAX_AMOUNT = 2000000;
   const PLATFORM_BPS = 100;    // 1%
   const PLATFORM_MIN = 50;
-  const CARD_BPS = 270;        // Stripe New Zealand, domestic card
-  const CARD_BPS_INTL = 370;
-  const CARD_FIXED = 30;
+  // Card rates by currency (domestic / international / fixed), mirrors src/money.js CURRENCIES.
+  const CURRENCY_META = {
+    usd: { symbol: "$",   label: "USD – US Dollar",          bps: 290, bpsIntl: 390, fixed: 30 },
+    aud: { symbol: "A$",  label: "AUD – Australian Dollar",  bps: 170, bpsIntl: 370, fixed: 30 },
+    nzd: { symbol: "NZ$", label: "NZD – New Zealand Dollar", bps: 270, bpsIntl: 370, fixed: 30 },
+    gbp: { symbol: "£",   label: "GBP – British Pound",      bps: 150, bpsIntl: 250, fixed: 20 },
+    eur: { symbol: "€",   label: "EUR – Euro",               bps: 150, bpsIntl: 250, fixed: 25 },
+    cad: { symbol: "CA$", label: "CAD – Canadian Dollar",    bps: 290, bpsIntl: 390, fixed: 30 },
+  };
+  // Active currency for the current wizard session (default USD, persisted across page reloads).
+  let activeCurrency = (() => { try { return localStorage.getItem("vl_currency") || "usd"; } catch(_) { return "usd"; } })();
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -96,17 +104,17 @@
   // ---------- formatting ----------
   // Every amount from the server is an integer number of cents. Format for display only: never
   // do arithmetic on a formatted string, and never send one back.
-  const SYMBOLS = { nzd: "NZ$" };
-  function fmt(cents, code = "nzd") {
+  function fmt(cents, code) {
+    const c = CURRENCY_META[code] || CURRENCY_META[activeCurrency] || CURRENCY_META.usd;
     if (cents === null || cents === undefined) return "\u2014";
     const sign = cents < 0 ? "-" : "";
     const abs = Math.abs(Math.round(cents));
-    return `${sign}${SYMBOLS[code] || "$"}${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, "0")}`;
+    return `${sign}${c.symbol}${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, "0")}`;
   }
 
   // "12.34" -> 1234 cents, or null if it isn't an amount we accept.
   function parseMoney(input) {
-    const text = String(input == null ? "" : input).trim().replace(/[,\s$]|NZ/g, "");
+    const text = String(input == null ? "" : input).trim().replace(/[,\s]|^[A-Z]*\$/g, "");
     if (!/^\d{1,9}(\.\d{1,2})?$/.test(text)) return null;
     const [whole, part = ""] = text.split(".");
     const cents = Number(whole) * 100 + Number(part.padEnd(2, "0"));
@@ -114,13 +122,14 @@
   }
 
   // A preview of the server's quote, so the wizard can show numbers before a deal exists.
-  function quoteFor(amount) {
+  function quoteFor(amount, code) {
+    const c = CURRENCY_META[code] || CURRENCY_META[activeCurrency] || CURRENCY_META.usd;
     const platformFee = Math.max(PLATFORM_MIN, Math.round((amount * PLATFORM_BPS) / 10000));
     const buyerTotal = amount + platformFee;
-    const processorFee = Math.round((buyerTotal * CARD_BPS) / 10000) + CARD_FIXED;
-    const worst = Math.round((buyerTotal * CARD_BPS_INTL) / 10000) + CARD_FIXED;
+    const processorFee = Math.round((buyerTotal * c.bps) / 10000) + c.fixed;
+    const worst = Math.round((buyerTotal * c.bpsIntl) / 10000) + c.fixed;
     return {
-      currency: "nzd", amount, platformFee, platformBps: PLATFORM_BPS, buyerTotal,
+      currency: code || activeCurrency, amount, platformFee, platformBps: PLATFORM_BPS, buyerTotal,
       processorFee, sellerNet: amount - processorFee,
       processorFeeWorst: worst, sellerNetWorst: amount - worst,
     };
@@ -1023,21 +1032,36 @@
       }
 
       if (step === 2) {
+        if (!draft.currency) draft.currency = activeCurrency;
+        const currSel = el("select", { id: "deal-currency", name: "currency", class: "currency-select" },
+          ...Object.entries(CURRENCY_META).map(([code, meta]) =>
+            el("option", { value: code, selected: code === draft.currency || undefined }, meta.label)));
+        const symSpan = el("span", {}, CURRENCY_META[draft.currency].symbol);
         const amount = el("input", { id: "deal-amount", name: "amount", type: "text", inputmode: "decimal", autocomplete: "off", required: true, placeholder: "0.00" });
         amount.value = draft.amount;
         const note = el("p", { class: "hint" });
         const updateNote = () => {
+          const code = draft.currency;
           const cents = parseMoney(amount.value);
-          if (cents === null) { note.textContent = `Between ${fmt(MIN_AMOUNT)} and ${fmt(MAX_AMOUNT)}, in New Zealand dollars.`; return; }
-          const q = quoteFor(cents);
-          note.textContent = `The buyer pays ${fmt(q.buyerTotal)}, including our ${fmt(q.platformFee)} fee. The seller is quoted ${fmt(cents)} and receives about ${fmt(q.sellerNet)} after Stripe's card fee.`;
+          if (cents === null) { note.textContent = `Between ${fmt(MIN_AMOUNT, code)} and ${fmt(MAX_AMOUNT, code)}.`; return; }
+          const q = quoteFor(cents, code);
+          note.textContent = `The buyer pays ${fmt(q.buyerTotal, code)}, including our ${fmt(q.platformFee, code)} fee. The seller is quoted ${fmt(cents, code)} and receives about ${fmt(q.sellerNet, code)} after Stripe's card fee.`;
         };
+        currSel.addEventListener("change", () => {
+          draft.currency = currSel.value;
+          activeCurrency = currSel.value;
+          try { localStorage.setItem("vl_currency", currSel.value); } catch(_) {}
+          symSpan.textContent = CURRENCY_META[currSel.value].symbol;
+          updateNote();
+        });
         amount.addEventListener("input", updateNote);
         updateNote();
         put(form,
           el("p", { class: "q" }, "How much, and how long?"),
-          el("label", { for: "deal-amount" }, "Amount (NZD)"),
-          el("div", { class: "amount-input" }, el("span", {}, "NZ$"), amount),
+          el("label", { for: "deal-currency" }, "Currency"),
+          currSel,
+          el("label", { for: "deal-amount" }, "Amount"),
+          el("div", { class: "amount-input" }, symSpan, amount),
           note,
           el("label", {}, "Refund deadline"),
           el("p", { class: "hint" }, "If the deal isn't finished this long after the buyer pays, the buyer can cancel and the hold is released."),
@@ -1047,7 +1071,7 @@
         form.onsubmit = (e) => {
           e.preventDefault();
           const cents = parseMoney(amount.value);
-          if (cents === null) return flash(`Enter an amount between ${fmt(MIN_AMOUNT)} and ${fmt(MAX_AMOUNT)}.`);
+          if (cents === null) return flash(`Enter an amount between ${fmt(MIN_AMOUNT, draft.currency)} and ${fmt(MAX_AMOUNT, draft.currency)}.`);
           draft.amount = amount.value.trim();
           step = 3; draw();
         };
@@ -1056,7 +1080,7 @@
 
       if (step === 3) {
         const n = parseMoney(draft.amount);
-        const q = quoteFor(n);
+        const q = quoteFor(n, draft.currency);
         const other = typeOptions(app.me.kind).find(([v]) => v === draft.type)[1].toLowerCase();
         put(form,
           el("p", { class: "q" }, "Check the details"),
@@ -1065,9 +1089,10 @@
             draft.description ? el("dt", {}, "Details") : null, draft.description ? el("dd", {}, draft.description) : null,
             el("dt", {}, "Other side"), el("dd", {}, `${other[0].toUpperCase()}${other.slice(1)} (${TYPE_LABELS[draft.type]})`),
             el("dt", {}, "You are"), el("dd", {}, draft.role === "buyer" ? "Paying (sender)" : "Getting paid (receiver)"),
-            el("dt", {}, "Deal amount"), el("dd", {}, fmt(n)),
-            el("dt", {}, draft.role === "buyer" ? "You pay" : "The buyer pays"), el("dd", {}, fmt(q.buyerTotal)),
-            el("dt", {}, draft.role === "seller" ? "You receive, about" : "The seller receives, about"), el("dd", {}, fmt(q.sellerNet)),
+            el("dt", {}, "Currency"), el("dd", {}, (CURRENCY_META[draft.currency] || CURRENCY_META.usd).label),
+            el("dt", {}, "Deal amount"), el("dd", {}, fmt(n, draft.currency)),
+            el("dt", {}, draft.role === "buyer" ? "You pay" : "The buyer pays"), el("dd", {}, fmt(q.buyerTotal, draft.currency)),
+            el("dt", {}, draft.role === "seller" ? "You receive, about" : "The seller receives, about"), el("dd", {}, fmt(q.sellerNet, draft.currency)),
             el("dt", {}, "Refund deadline"), el("dd", {}, `${DEADLINES.find(([h]) => h === draft.deadlineHours)[1]} after the buyer pays`)),
           el("p", { class: "hint" }, "Next you'll get a one-time invite code to send to the other side. Nobody pays anything until they've joined."),
           nav("Create deal"));
@@ -1078,7 +1103,7 @@
           try {
             const deal = await api("POST", "/deals", {
               type: draft.type, role: draft.role, title: draft.title, description: draft.description,
-              amount: n, deadlineHours: draft.deadlineHours,
+              amount: n, deadlineHours: draft.deadlineHours, currency: draft.currency,
             }, { headers: { "Idempotency-Key": draft.key } });
             location.hash = "#deal/" + encodeURIComponent(deal.id);
           } catch (err) {
@@ -1124,7 +1149,7 @@
           el("dt", {}, "Deal type"), el("dd", {}, TYPE_LABELS[p.type]),
           el("dt", {}, "You'll be"), el("dd", {}, p.yourRole === "buyer" ? "Paying (sender)" : "Getting paid (receiver)"),
           el("dt", {}, "Amount"), el("dd", {}, `${fmt(p.amount)}`),
-          el("dt", {}, "Receiver gets, about"), el("dd", {}, fmt(quoteFor(p.amount).sellerNet, p.currency)),
+          el("dt", {}, "Receiver gets, about"), el("dd", {}, fmt(quoteFor(p.amount, p.currency).sellerNet, p.currency)),
           el("dt", {}, "Refund deadline"), el("dd", {}, `${p.deadlineHours} hours after funding`)),
         p.canJoin ? null : el("p", { class: "flash error" }, p.reason),
         el("div", { class: "wiz-nav" },
@@ -2041,7 +2066,7 @@
         el("div", { class: "set-row" }, el("span", {}, me.kind === "agent" ? "Agent name" : "Username"), el("strong", {}, me.name)),
         el("div", { class: "set-row" }, el("span", {}, "Account type"), el("strong", {}, me.kind === "agent" ? "AI agent" : "Person")),
         el("div", { class: "set-row" }, el("span", {}, "Account ID"), el("div", { class: "row" }, el("code", {}, me.accountId), copyButton(me.accountId, "Copy"))),
-        el("div", { class: "set-row" }, el("span", {}, "Currency"), el("strong", {}, "New Zealand dollars"))),
+        el("div", { class: "set-row" }, el("span", {}, "Currency"), el("strong", {}, "Set per deal"))),
       el("section", { class: "card" },
         el("h2", {}, "Appearance"),
         el("div", { class: "set-row" }, el("span", {}, "Theme"), seg)));

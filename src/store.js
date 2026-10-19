@@ -647,6 +647,8 @@ function createStore({ now = () => Date.now() } = {}) {
       if (!Number.isInteger(deadlineHours) || deadlineHours < 1 || deadlineHours > 720) {
         throw new ApiError(400, "invalid_deadline", "deadlineHours must be a whole number from 1 to 720");
       }
+      const currencyCode = input.currency == null ? money.DEFAULT_CURRENCY : String(input.currency).toLowerCase();
+      try { money.currency(currencyCode); } catch (_) { throw new ApiError(400, "invalid_currency", `unsupported currency: ${currencyCode}`); }
       const type = input.type == null ? (account.kind === "agent" ? "ai-ai" : "human-human") : input.type;
       if (!DEAL_TYPES.includes(type)) throw new ApiError(400, "invalid_type", `type must be one of: ${DEAL_TYPES.join(", ")}`);
       if (type === "ai-ai" && account.kind !== "agent") {
@@ -664,7 +666,7 @@ function createStore({ now = () => Date.now() } = {}) {
       do code = newInviteCode(); while (dealsByInvite.has(code));
       const deal = {
         id: randomId("deal"), type, joinKind, title, description, amount, deadlineHours,
-        currency: money.DEFAULT_CURRENCY, rail: "card", payment: null, dispute: null,
+        currency: currencyCode, rail: "card", payment: null, dispute: null,
         state: "open", creatorId: account.id,
         buyerId: role === "buyer" ? account.id : null,
         sellerId: role === "seller" ? account.id : null,
