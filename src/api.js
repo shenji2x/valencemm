@@ -1,6 +1,7 @@
 const { ApiError } = require("./errors");
 const { clientIp, bearer, sendJson, readJson, readRaw, limiter } = require("./http");
 const { createSupport } = require("./support");
+const money = require("./money");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
 
 const DEFAULT_INVITE = "https://discord.gg/eVYyxbyy22";
@@ -22,15 +23,15 @@ function createApi(store, opts = {}) {
   const registerLimit = limiter({ windowMs: 3600 * 1000, max: opts.registerLimit || 20, code: "register_rate_limited" });
   const loginLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.loginLimit || 30, code: "login_rate_limited" });
   const joinLimit = limiter({ windowMs: 60 * 1000, max: opts.joinLimit || 20, code: "join_rate_limited" });
-  const redeemLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.redeemLimit || 20, code: "redeem_rate_limited" });
+  const payLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.payLimit || 40, code: "payment_rate_limited" });
 
   // ---- accounts ----
   add("POST", "/agents/register", { limit: registerLimit }, ({ body }) => ({
     status: 201,
     body: {
       ...store.registerAgent(body.name),
-      currency: "play-credits",
-      notice: "Save your apiKey now. It is shown only once. Play credits have no real-world value.",
+      currency: money.DEFAULT_CURRENCY,
+      notice: "Save your apiKey now. It is shown only once.",
     },
   }));
   add("POST", "/humans/signup", { limit: registerLimit }, async ({ body }) => ({
@@ -45,9 +46,6 @@ function createApi(store, opts = {}) {
     return { body: { ok: true } };
   });
   add("GET", "/me", { auth: true }, ({ account }) => ({ body: store.me(account) }));
-  add("POST", "/credits/redeem", { auth: true, limit: redeemLimit }, ({ account, body }) => ({
-    body: store.redeemCredits(account, body.code),
-  }));
 
   // ---- deals ----
   add("GET", "/deals", { auth: true }, ({ account }) => ({ body: { deals: store.listDeals(account) } }));
@@ -59,11 +57,114 @@ function createApi(store, opts = {}) {
     body: store.joinDeal(account, body.inviteCode),
   }));
   add("GET", "/deals/:id", { auth: true }, ({ account, params }) => ({ body: store.getDeal(account, params.id) }));
-  for (const action of ["fund", "release", "refund", "cancel"]) {
-    add("POST", `/deals/:id/${action}`, { auth: true, mutate: true }, ({ account, params }) => ({
-      body: store[action + "Deal"](account, params.id),
-    }));
-  }
+  add("POST", "/deals/:id/cancel", { auth: true, mutate: true }, ({ account, params }) => ({
+    body: store.cancelDeal(account, params.id),
+  }));
+
+  // ---- money ----
+  //
+  // None of these routes move money themselves. They ask Stripe to, and record what it did.
+  const payments = opts.payments;
+  const needPayments = () => {
+    if (!payments) throw new ApiError(503, "payments_off", "Card payments aren't switched on for this server yet.");
+    return payments;
+  };
+
+  // Prices the deal and returns what the browser needs for Stripe's card form. The card details
+  // go straight from the buyer's browser to Stripe; they never touch this server.
+  add("POST", "/deals/:id/fund", { auth: true, mutate: true, limit: payLimit }, async ({ account, params }) => ({
+    body: await needPayments().startFunding(account, params.id),
+  }));
+
+  // The buyer's browser reports that the card cleared. The webhook is authoritative, but we check
+  // with Stripe here so the buyer isn't left refreshing.
+  add("POST", "/deals/:id/funded", { auth: true, mutate: true, limit: payLimit }, async ({ account, params }) => ({
+    body: await needPayments().confirmFunding(account, params.id),
+  }));
+
+  add("POST", "/deals/:id/deliver", { auth: true, mutate: true }, ({ account, params, body }) => ({
+    body: store.markDelivered(account, params.id, body.note),
+  }));
+
+  add("POST", "/deals/:id/release", { auth: true, mutate: true }, async ({ account, params }) => ({
+    body: await needPayments().release(account, params.id),
+  }));
+
+  add("POST", "/deals/:id/refund", { auth: true, mutate: true }, async ({ account, params, body }) => ({
+    body: await needPayments().refund(account, params.id, { reason: body.reason || null }),
+  }));
+
+  add("POST", "/deals/:id/dispute", { auth: true, mutate: true }, ({ account, params, body }) => ({
+    body: store.openDispute(account, params.id, body.reason),
+  }));
+
+  // ---- getting paid ----
+
+  // Sends the seller to Stripe's own onboarding. Valence never sees their bank details or ID.
+  add("POST", "/payouts/onboarding-link", { auth: true, mutate: true, limit: payLimit }, async ({ account }) => ({
+    body: await needPayments().onboardingLink(account),
+  }));
+
+  add("POST", "/payouts/refresh", { auth: true, mutate: true, limit: payLimit }, async ({ account }) => ({
+    body: await needPayments().refreshPayoutStatus(account),
+  }));
+
+  // Which rails this account can be paid on. Never a balance: there isn't one.
+  add("GET", "/payouts", { auth: true }, ({ account }) => ({
+    body: {
+      ...store.payoutsStatus(account),
+      enabled: Boolean(payments && payments.configured),
+      publishableKey: payments ? payments.publishableKey : null,
+      currency: money.DEFAULT_CURRENCY,
+      holdDays: money.HOLD_DAYS,
+      awaitingSetup: store.dealsAwaitingSetup(account.id),
+    },
+  }));
+
+  // ---- history ----
+  add("GET", "/payments", { auth: true }, ({ account }) => ({ body: store.payments(account) }));
+
+  add("GET", "/payments.csv", { auth: true, send: true }, ({ account, res }) => {
+    const { events } = store.payments(account, { limit: 5000 });
+    const cell = (v) => (v == null ? "" : `"${String(v).replace(/"/g, '""')}"`);
+    const rows = [["date", "event", "deal", "amount", "currency", "direction", "reference", "detail"]
+      .map(cell).join(",")];
+    for (const e of events) {
+      rows.push([e.at, e.event, e.dealId, e.amount == null ? "" : (e.amount / 100).toFixed(2), e.currency, e.direction, e.ref, e.detail].map(cell).join(","));
+    }
+    const body = rows.join("\r\n") + "\r\n";
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="valence-payments-${new Date().toISOString().slice(0, 10)}.csv"`,
+      "Content-Length": Buffer.byteLength(body),
+      "Cache-Control": "no-store",
+    });
+    res.end(body);
+    return {};
+  });
+
+  // ---- the webhook ----
+  //
+  // Stripe tells us what actually happened. Verify the signature first, answer immediately, and
+  // treat every handler as something that may run more than once.
+  add("POST", "/webhooks/stripe", { raw: true, send: true }, async ({ raw, req, res }) => {
+    const p = opts.payments;
+    const verified = opts.stripe
+      ? opts.stripe.verifyWebhook(raw, req.headers["stripe-signature"])
+      : { ok: false, reason: "stripe_off" };
+    if (!verified.ok) {
+      console.error("Rejected a Stripe webhook:", verified.reason);
+      return sendJson(res, 400, { error: { code: "bad_signature", message: "Signature check failed" } });
+    }
+    // Answer first: a slow handler must never make Stripe think we are down.
+    sendJson(res, 200, { received: true });
+    try {
+      if (p) await p.handleWebhook(verified.event);
+    } catch (err) {
+      console.error("Stripe webhook handler failed:", err && err.message);
+    }
+    return {};
+  });
 
   // ---- people: two-factor sign-in and security settings ----
   const mailer = opts.mailer || { enabled: false, async send() { throw new Error("off"); } };

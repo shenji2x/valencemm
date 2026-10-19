@@ -371,8 +371,6 @@ td { color: var(--muted); }
 :root[data-theme="dark"] .page-ico { color: var(--accent-hi); }
 .page-ico svg { width: 19px; height: 19px; }
 .app-top .spacer { flex: 1; }
-.balance-chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border: 1px solid var(--line-2); border-radius: 999px; font-size: .9rem; color: var(--muted); }
-.balance-chip b { color: var(--fg); }
 .burger { display: none; }
 .scrim { display: none; }
 .view { padding: 30px 32px 64px; max-width: 1180px; }
@@ -531,7 +529,6 @@ details.more summary { cursor: pointer; color: var(--muted); font-weight: 500; p
   .burger { display: inline-grid; }
   .app-top { padding: 0 16px; }
   .view { padding: 22px 16px 56px; }
-  .app-top .balance-chip { display: none; }
 }
 @media (max-width: 640px) {
   .wrap, .nav { padding-left: 16px; padding-right: 16px; }
@@ -560,7 +557,7 @@ details.more summary { cursor: pointer; color: var(--muted); font-weight: 500; p
 }
 
 /* figures set in JetBrains Mono */
-.hero-stats b, .mock-tiles b, .tile b, .item .amt, .balance-chip b, .split b, .review dd.fig, .amount-input input { font-family: var(--mono); font-weight: 600; letter-spacing: -0.03em; }
+.hero-stats b, .mock-tiles b, .tile b, .item .amt, .split b, .review dd.fig, .amount-input input { font-family: var(--mono); font-weight: 600; letter-spacing: -0.03em; }
 .hero-stats b { font-weight: 600; }
 
 /* security settings */
@@ -609,3 +606,46 @@ details.more summary { cursor: pointer; color: var(--muted); font-weight: 500; p
 .discord-card.subtle { background: var(--surface); border-color: var(--line); }
 .discord-card.subtle .page-ico { background: var(--accent-soft); color: var(--accent); }
 .composer { align-items: flex-end; }
+
+/* ---- payments ---- */
+
+/* The fee breakdown. Every line names who charges it, so nothing reads as a hidden markup. */
+.breakdown { border: 1px solid var(--line-2); border-radius: 12px; padding: 14px 16px; margin: 14px 0; background: var(--line); }
+.fees { display: grid; grid-template-columns: 1fr auto; gap: 10px 18px; margin: 0; align-items: baseline; }
+.fees dt { color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+.fees dd { margin: 0; text-align: right; white-space: nowrap; }
+.fee-hint { font-size: .8rem; color: var(--dim); max-width: 46ch; line-height: 1.45; }
+.breakdown .total { display: flex; justify-content: space-between; align-items: baseline; gap: 18px;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-2); }
+.breakdown .total strong { font-size: 1.3rem; }
+.breakdown .hint { margin: 10px 0 0; }
+
+/* Stripe's card form mounts here. Give it room before it loads so the panel doesn't jump. */
+.pay { margin-top: 14px; }
+.pay-slot { min-height: 190px; }
+.pay .dim { margin-top: 10px; }
+
+/* What is held, stated plainly at the top of a funded deal. */
+.held { font-weight: 600; margin: 4px 0 10px; }
+.next blockquote.note { margin: 12px 0; padding: 10px 14px; border-left: 3px solid var(--accent);
+  background: var(--line); border-radius: 0 8px 8px 0; color: var(--fg); }
+
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.card-head h2 { margin: 0; }
+
+td.num.in { color: var(--ok); }
+td.num.out { color: var(--muted); }
+td .s { display: block; font-size: .8rem; color: var(--dim); }
+
+.set-row strong.ok { color: var(--ok); }
+.set-row strong.warn { color: var(--warn); }
+.flash.warn { border-color: var(--warn); color: var(--warn); }
+
+/* The amount field now takes dollars, with the symbol outside the input. */
+.amount-input { display: flex; align-items: center; gap: 8px; }
+.amount-input > span { color: var(--muted); font-family: var(--mono); }
+.amount-input input { flex: 1; min-width: 0; }
+
+.badge.awaiting_setup, .badge.funding { background: var(--line); color: var(--muted); }
+.badge.delivered { background: var(--accent-soft, var(--line)); color: var(--accent); }
+.badge.disputed { background: var(--warn-soft); color: var(--warn); }

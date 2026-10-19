@@ -9,13 +9,27 @@
   const STATE_LABELS = {
     open: "Waiting for the other side",
     joined: "Ready to fund",
-    funded: "In escrow",
-    released: "Released",
+    awaiting_setup: "Waiting on payout setup",
+    funding: "Payment in progress",
+    funded: "Funds held",
+    delivered: "Delivered, awaiting release",
+    disputed: "In dispute",
+    released: "Paid out",
     refunded: "Refunded",
     cancelled: "Cancelled",
   };
-  const ACTIVE = new Set(["open", "joined", "funded"]);
-  const TICKET_CATEGORIES = [["deal", "A problem with a deal"], ["payments", "Credits and payments"], ["account", "My account"], ["bug", "Something is broken"], ["other", "Something else"]];
+  const ACTIVE = new Set(["open", "joined", "awaiting_setup", "funding", "funded", "delivered", "disputed"]);
+  const TICKET_CATEGORIES = [["deal", "A problem with a deal"], ["payments", "Payments and payouts"], ["account", "My account"], ["bug", "Something is broken"], ["other", "Something else"]];
+
+  // Mirrors src/money.js. These are for previews and for enabling buttons; the server prices
+  // every real charge and never trusts an amount the browser sends.
+  const MIN_AMOUNT = 500;      // NZ$5.00
+  const MAX_AMOUNT = 2000000;  // NZ$20,000.00
+  const PLATFORM_BPS = 100;    // 1%
+  const PLATFORM_MIN = 50;
+  const CARD_BPS = 270;        // Stripe New Zealand, domestic card
+  const CARD_BPS_INTL = 370;
+  const CARD_FIXED = 30;
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -80,7 +94,37 @@
   }
 
   // ---------- formatting ----------
-  const credits = (n) => Number(n || 0).toLocaleString();
+  // Every amount from the server is an integer number of cents. Format for display only: never
+  // do arithmetic on a formatted string, and never send one back.
+  const SYMBOLS = { nzd: "NZ$" };
+  function fmt(cents, code = "nzd") {
+    if (cents === null || cents === undefined) return "\u2014";
+    const sign = cents < 0 ? "-" : "";
+    const abs = Math.abs(Math.round(cents));
+    return `${sign}${SYMBOLS[code] || "$"}${Math.floor(abs / 100).toLocaleString()}.${String(abs % 100).padStart(2, "0")}`;
+  }
+
+  // "12.34" -> 1234 cents, or null if it isn't an amount we accept.
+  function parseMoney(input) {
+    const text = String(input == null ? "" : input).trim().replace(/[,\s$]|NZ/g, "");
+    if (!/^\d{1,9}(\.\d{1,2})?$/.test(text)) return null;
+    const [whole, part = ""] = text.split(".");
+    const cents = Number(whole) * 100 + Number(part.padEnd(2, "0"));
+    return cents >= MIN_AMOUNT && cents <= MAX_AMOUNT ? cents : null;
+  }
+
+  // A preview of the server's quote, so the wizard can show numbers before a deal exists.
+  function quoteFor(amount) {
+    const platformFee = Math.max(PLATFORM_MIN, Math.round((amount * PLATFORM_BPS) / 10000));
+    const buyerTotal = amount + platformFee;
+    const processorFee = Math.round((buyerTotal * CARD_BPS) / 10000) + CARD_FIXED;
+    const worst = Math.round((buyerTotal * CARD_BPS_INTL) / 10000) + CARD_FIXED;
+    return {
+      currency: "nzd", amount, platformFee, platformBps: PLATFORM_BPS, buyerTotal,
+      processorFee, sellerNet: amount - processorFee,
+      processorFeeWorst: worst, sellerNetWorst: amount - worst,
+    };
+  }
   function duration(ms) {
     if (ms == null) return "-";
     const min = ms / 60000;
@@ -401,7 +445,7 @@
     const box = $("#nav-auth");
     if (!box || !getToken()) return;
     box.textContent = "";
-    put(box, 
+    put(box,
       el("button", { type: "button", class: "btn small outline", onclick: logout }, "Log out"),
       el("a", { href: "/dashboard", class: "btn small" }, "Dashboard")
     );
@@ -521,6 +565,7 @@
     join: { title: "Join a deal", icon: "join", render: viewJoin, slim: true },
     deals: { title: "Active deals", icon: "deals", render: viewActive },
     history: { title: "Past deals", icon: "history", render: viewHistory },
+    payments: { title: "Payments", icon: "wallet", render: viewPayments },
     deal: { title: "Deal", icon: "deals", nav: "deals", render: viewDeal, slim: true },
     support: { title: "Support", icon: "support", render: viewSupport },
     ticket: { title: "Support ticket", icon: "support", nav: "support", render: viewTicket, slim: true },
@@ -539,13 +584,8 @@
   }
   const alive = (gen) => gen === app.gen;
 
-  function setBalance(n) {
-    const b = $("#top-balance");
-    if (b) b.textContent = credits(n);
-  }
   async function refreshMe() {
     app.me = await api("GET", "/me");
-    setBalance(app.me.balance);
     return app.me;
   }
   function setCounts(deals) {
@@ -625,6 +665,136 @@
     route();
   }
 
+  // ---------- paying ----------
+  //
+  // Card details are typed into an iframe served by Stripe and go straight to Stripe. They never
+  // touch a Valence page or a Valence server, which is what keeps us out of PCI scope.
+  let stripeJs = null;
+  function loadStripeJs() {
+    if (stripeJs) return stripeJs;
+    stripeJs = new Promise((resolve, reject) => {
+      if (window.Stripe) return resolve(window.Stripe);
+      const tag = el("script", { src: "https://js.stripe.com/v3/" });
+      tag.addEventListener("load", () => (window.Stripe ? resolve(window.Stripe) : reject(new Error("Stripe didn't load properly."))));
+      tag.addEventListener("error", () => {
+        stripeJs = null;
+        reject(new Error("Couldn't reach Stripe. An ad blocker or privacy extension is the usual cause."));
+      });
+      document.head.append(tag);
+    });
+    return stripeJs;
+  }
+
+  function stripeAppearance() {
+    const light = document.documentElement.getAttribute("data-theme") === "light";
+    return {
+      theme: light ? "stripe" : "night",
+      variables: { colorPrimary: "#4c8dff", borderRadius: "10px", fontFamily: "Roboto, system-ui, sans-serif" },
+    };
+  }
+
+  // Every fee, named, with whoever charges it. A fee with no owner reads as ours, and padded.
+  function breakdown(q, { forSeller = false } = {}) {
+    const pct = (bps) => `${(bps / 100).toFixed(1).replace(/\.0$/, "")}%`;
+    const rows = forSeller
+      ? [["Deal amount", fmt(q.amount, q.currency), null],
+         ["Card processing", "\u2212" + fmt(q.processorFee, q.currency), "Stripe's fee. You're the merchant on this charge, so it's yours, exactly as it would be anywhere else."],
+         ["Valence fee", fmt(0, q.currency), "Paid by the buyer on top of your price. Nothing is taken from you."]]
+      : [["Deal amount", fmt(q.amount, q.currency), null],
+         [`Valence fee (${pct(q.platformBps)})`, fmt(q.platformFee, q.currency), "For holding the payment, the dispute process and support. Returned in full if the deal is cancelled or refunded."]];
+    return el("div", { class: "breakdown" },
+      el("dl", { class: "fees" }, rows.map(([label, value, hint]) =>
+        [el("dt", {}, label, hint ? el("span", { class: "fee-hint" }, hint) : null),
+         el("dd", { class: "num" }, value)]).flat()),
+      el("div", { class: "total" },
+        el("span", {}, forSeller ? "You receive, about" : "You pay today"),
+        el("strong", { class: "num" }, fmt(forSeller ? q.sellerNet : q.buyerTotal, q.currency))),
+      forSeller
+        ? el("p", { class: "hint" }, `Stripe's fee depends on the card the buyer uses, so an overseas card would leave you about ${fmt(q.sellerNetWorst, q.currency)}. Your bank may charge for incoming transfers too.`)
+        : el("p", { class: "hint" }, `The seller is paid ${fmt(q.amount, q.currency)} less Stripe's processing fee. Your card is only held until you release the deal. No other charges, ever.`));
+  }
+
+  // Builds Stripe's card form for a deal and resolves once the hold is on the card.
+  async function cardForm(dealId, { onFunded }) {
+    const wrap = el("div", { class: "pay" });
+    const slot = el("div", { class: "pay-slot" });
+    const msg = el("p", { class: "flash error", hidden: true, role: "alert" });
+    const button = el("button", { type: "button", class: "btn", disabled: true }, "Preparing\u2026");
+    const show = (text) => { msg.textContent = text || ""; msg.hidden = !text; };
+    put(wrap, slot, msg, el("div", { class: "actions" }, button),
+      el("p", { class: "dim" }, "Card details go straight to Stripe. Valence never sees them."));
+
+    try {
+      const [payouts, started] = await Promise.all([
+        api("GET", "/payouts"),
+        api("POST", `/deals/${encodeURIComponent(dealId)}/fund`, undefined, { headers: { "Idempotency-Key": newKey() } }),
+      ]);
+      if (started.alreadyFunded) {
+        await onFunded();
+        return wrap;
+      }
+      if (!payouts.publishableKey) throw new Error("Card payments aren't finished being set up on this server.");
+      const Stripe = await loadStripeJs();
+      // A direct charge lives on the seller's own Stripe account, so Stripe.js must be told whose.
+      const stripe = Stripe(payouts.publishableKey, { stripeAccount: started.stripeAccount });
+      const elements = stripe.elements({ clientSecret: started.clientSecret, appearance: stripeAppearance() });
+      const element = elements.create("payment", { layout: "tabs" });
+      const label = `Pay ${fmt(started.quote.buyerTotal, started.quote.currency)}`;
+      element.mount(slot);
+      element.on("ready", () => { button.disabled = false; });
+      element.on("change", (e) => show(e.error ? e.error.message : ""));
+      button.textContent = label;
+
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        button.textContent = "Authorising\u2026";
+        show("");
+        const { error } = await stripe.confirmPayment({ elements, redirect: "if_required" });
+        if (error) {
+          show(error.message || "That card was declined. Nothing has been charged.");
+          button.disabled = false;
+          button.textContent = label;
+          return;
+        }
+        button.textContent = "Confirming\u2026";
+        try {
+          await api("POST", `/deals/${encodeURIComponent(dealId)}/funded`, {}, { headers: { "Idempotency-Key": newKey() } });
+        } catch (err) {
+          show(err.message);
+        }
+        await onFunded();
+      });
+    } catch (err) {
+      // Nothing was charged. Say why, and don't leave an empty card box or a dead button behind
+      // (.btn's display rule beats the hidden attribute, so remove rather than hide).
+      slot.remove();
+      button.parentNode.remove();
+      show(err.message);
+    }
+    return wrap;
+  }
+
+  const BRANDS = { visa: "Visa", mastercard: "Mastercard", amex: "American Express", discover: "Discover", jcb: "JCB", diners: "Diners Club", unionpay: "UnionPay" };
+  const cardBrand = (b) => BRANDS[b] || (b ? b[0].toUpperCase() + b.slice(1) : "card");
+
+  // Sends a seller to Stripe to set up getting paid.
+  function payoutButton(label = "Set up payouts", cls = "") {
+    const b = el("button", { type: "button", class: "btn " + cls }, label);
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      b.textContent = "Opening Stripe\u2026";
+      try {
+        const r = await api("POST", "/payouts/onboarding-link", {}, { headers: { "Idempotency-Key": newKey() } });
+        location.href = r.url;
+      } catch (err) {
+        flash(err.message);
+        b.disabled = false;
+        b.textContent = label;
+      }
+    });
+    return b;
+  }
+
   // ---------- shared pieces ----------
   function tile(iconName, value, label, accent) {
     return el("div", { class: "tile" + (accent ? " accent" : "") }, el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("b", { class: "num" }, value), el("span", {}, label)));
@@ -636,16 +806,22 @@
     const buyer = d.yourRole === "buyer";
     switch (d.state) {
       case "open": return "Waiting for the other side to join";
-      case "joined": return buyer ? "Fund escrow to start" : "Waiting for the sender to fund";
-      case "funded": return buyer ? "Release once you're happy" : "Do the work, then ask for release";
+      case "joined": return buyer ? "Pay to start the deal" : "Waiting for the buyer to pay";
+      case "awaiting_setup": return buyer ? "Waiting on the seller's payout setup" : "Finish setting up payouts";
+      case "funding": return buyer ? "Finish paying" : "The buyer is paying";
+      case "funded": return buyer ? "Release once you're happy" : "Do the work, then mark it delivered";
+      case "delivered": return buyer ? "Check the work and release" : "Waiting for the buyer to release";
+      case "disputed": return "In dispute";
       default: return STATE_LABELS[d.state];
     }
   }
-  const needsMe = (d) => (d.state === "joined" || d.state === "funded") && d.yourRole === "buyer";
+  const needsMe = (d) =>
+    (d.yourRole === "buyer" && ["joined", "funding", "funded", "delivered"].includes(d.state)) ||
+    (d.yourRole === "seller" && ["awaiting_setup", "funded"].includes(d.state));
   function dealItem(d) {
     return el("li", {}, el("a", { class: "item", href: "#deal/" + encodeURIComponent(d.id) },
       el("div", { class: "grow" }, el("span", { class: "t" }, d.title), el("span", { class: "s" }, `${TYPE_LABELS[d.type]} · ${roleText(d)} · ${nextHint(d)}`)),
-      el("span", { class: "amt num" }, `${credits(d.amount)} cr`),
+      el("span", { class: "amt num" }, fmt(d.amount, d.currency)),
       el("span", { class: "badge " + d.state }, STATE_LABELS[d.state])));
   }
   function emptyState(title, text, ...buttons) {
@@ -668,14 +844,14 @@
       const active = deals.filter((d) => ACTIVE.has(d.state));
       const attention = active.filter(needsMe);
       const waiting = active.filter((d) => !needsMe(d));
-      put(box, 
+      put(box,
         el("h2", {}, `Welcome back, ${me.name}`),
         el("p", { class: "muted" }, attention.length ? `${attention.length} deal${attention.length > 1 ? "s" : ""} need${attention.length > 1 ? "" : "s"} you.` : "Here's how your deals are going."),
         el("div", { class: "tiles" },
-          tile("wallet", credits(me.balance), "Balance (credits)", true),
+          tile("wallet", fmt(stats.volume.onHold, stats.currency), "Held right now", true),
           tile("deals", String(active.length), "Active deals"),
           tile("check", String(stats.counts.released), "Completed deals"),
-          tile("coins", credits(stats.volume.total), "Volume (credits)")),
+          tile("coins", fmt(stats.volume.total, stats.currency), "Volume")),
         el("div", { class: "two" },
           el("section", { class: "card" },
             el("h2", {}, "Needs you"),
@@ -689,16 +865,16 @@
               ? el("ul", { class: "list" }, me.recentLedger.slice(0, 8).map((e) => el("li", {}, el("div", { class: "item" },
                 el("span", { class: "page-ico" }, icon(e.delta >= 0 ? "arrowDown" : "arrowUp")),
                 el("div", { class: "grow" }, el("span", { class: "t" }, e.memo), el("span", { class: "s" }, ago(e.at))),
-                el("span", { class: "amt num" }, `${e.delta > 0 ? "+" : ""}${credits(e.delta)}`)))))
+                el("span", { class: "amt num" }, `${e.delta > 0 ? "+" : ""}${fmt(e.delta)}`)))))
               : el("p", { class: "muted" }, "No activity yet."))));
     }
     draw(deals, stats, me);
-    let last = JSON.stringify([deals, stats, me.balance]);
+    let last = JSON.stringify([deals, stats]);
     every(5000, async () => {
       const [d2, s2] = await Promise.all([api("GET", "/deals"), api("GET", "/stats"), refreshMe()]);
       if (!alive(gen)) return;
       setCounts(d2.deals);
-      const now = JSON.stringify([d2.deals, s2, app.me.balance]);
+      const now = JSON.stringify([d2.deals, s2]);
       if (now !== last) { last = now; draw(d2.deals, s2, app.me); }
     });
   }
@@ -716,7 +892,7 @@
       const y = T + plotH - (plotH * i) / 4;
       put(chart, svg("line", { class: "gridline", x1: L, x2: W, y1: y, y2: y }));
       const t = svg("text", { x: 0, y: y + 4 });
-      t.textContent = credits((top * i) / 4);
+      t.textContent = fmt((top * i) / 4);
       put(chart, t);
     }
     daily.forEach((d, i) => {
@@ -728,7 +904,7 @@
       const path = `M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + bw - r} Q${x + bw},${y} ${x + bw},${y + r} V${y + h} Z`;
       const bar = svg("path", { class: "bar" + (d.volume > 0 ? "" : " zero"), d: path });
       const tip = svg("title");
-      tip.textContent = `${new Date(d.date + "T00:00:00Z").toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })}: ${credits(d.volume)} credits in ${d.deals} deal${d.deals === 1 ? "" : "s"}`;
+      tip.textContent = `${new Date(d.date + "T00:00:00Z").toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" })}: ${fmt(d.volume)} in ${d.deals} deal${d.deals === 1 ? "" : "s"}`;
       put(bar, tip);
       // a taller invisible hit target so the tooltip is easy to reach
       const hit = svg("rect", { x, y: T, width: bw, height: plotH, fill: "transparent" });
@@ -749,14 +925,14 @@
     const pct = s.completionRate == null ? "-" : `${Math.round(s.completionRate * 100)}%`;
     const states = ["open", "joined", "funded", "released", "refunded", "cancelled"];
     const maxCount = Math.max(1, ...states.map((k) => s.counts[k]));
-    put(view, 
+    put(view,
       el("div", { class: "tiles" },
-        tile("coins", credits(s.volume.total), "Total volume (credits)", true),
-        tile("arrowUp", credits(s.volume.sent), "Sent"),
-        tile("arrowDown", credits(s.volume.received), "Received"),
-        tile("clock", duration(s.durationMs.avgFundedToReleased), "Avg time in escrow"),
+        tile("coins", fmt(s.volume.total, s.currency), "Total volume", true),
+        tile("arrowUp", fmt(s.volume.sent), "Sent"),
+        tile("arrowDown", fmt(s.volume.received), "Received"),
+        tile("clock", duration(s.durationMs.avgFundedToReleased), "Avg time held"),
         tile("percent", pct, "Completion rate"),
-        tile("wallet", credits(s.volume.inEscrow), "In escrow now")),
+        tile("wallet", fmt(s.volume.onHold, s.currency), "Held right now")),
       el("section", { class: "card" },
         el("div", { class: "row between" }, el("h2", {}, "Released volume, last 30 days"), el("span", { class: "dim" }, "Hover a bar for the day's total")),
         s.daily.some((d) => d.volume > 0) ? barChart(s.daily) : el("p", { class: "muted" }, "No released deals in the last 30 days yet. Once deals complete, their volume shows up here day by day.")),
@@ -766,9 +942,9 @@
           el("dl", { class: "facts" },
             el("dt", {}, "Average, start to finish"), el("dd", {}, duration(s.durationMs.avgCreatedToReleased)),
             el("dt", {}, "Typical (median)"), el("dd", {}, duration(s.durationMs.medianCreatedToReleased)),
-            el("dt", {}, "Average time in escrow"), el("dd", {}, duration(s.durationMs.avgFundedToReleased)),
+            el("dt", {}, "Average time held"), el("dd", {}, duration(s.durationMs.avgFundedToReleased)),
             el("dt", {}, "Fastest deal"), el("dd", {}, duration(s.durationMs.fastest)),
-            el("dt", {}, "Fees paid"), el("dd", {}, `${credits(s.volume.feesPaid)} credits`))),
+            el("dt", {}, "Card fees you paid"), el("dd", {}, fmt(s.volume.feesPaid, s.currency)))),
         el("section", { class: "card" },
           el("h2", {}, "Deals by status"),
           el("div", { class: "split" }, states.map((k) => {
@@ -784,7 +960,8 @@
       ? [["ai-ai", "An AI agent", "Both sides are AI agents using the API."], ["ai-human", "A person", "A human will join from the website."]]
       : [["human-human", "A person", "Another person joins from the website."], ["ai-human", "An AI agent", "An AI agent joins through the API."]];
   }
-  const DEADLINES = [[24, "1 day"], [72, "3 days"], [168, "7 days"], [336, "14 days"], [720, "30 days"]];
+  // A card hold lasts about 7 days, so a deal can never promise longer than that.
+  const DEADLINES = [[12, "12 hours"], [24, "1 day"], [48, "2 days"], [72, "3 days"], [168, "7 days"]];
 
   function viewNewDeal(view) {
     const draft = { type: null, role: null, title: "", description: "", amount: "", deadlineHours: 72, key: newKey() };
@@ -809,12 +986,12 @@
       put(body, form);
 
       if (step === 0) {
-        put(form, 
+        put(form,
           el("p", { class: "q" }, "Who are you dealing with?"),
           el("div", { class: "choices" }, typeOptions(app.me.kind).map(([v, t, s]) => choice(draft.type === v, t, s, () => { draft.type = v; draw(); }))),
           el("p", { class: "q spaced" }, "Are you paying or getting paid?"),
           el("div", { class: "choices" },
-            choice(draft.role === "buyer", "I'm paying", "You fund escrow and release it when you're happy.", () => { draft.role = "buyer"; draw(); }),
+            choice(draft.role === "buyer", "I'm paying", "You pay by card. The money is held, not sent, until you release it.", () => { draft.role = "buyer"; draw(); }),
             choice(draft.role === "seller", "I'm getting paid", "You do the work and receive the funds.", () => { draft.role = "seller"; draw(); })),
           nav("Continue", null, { canBack: false }));
         form.onsubmit = (e) => {
@@ -829,7 +1006,7 @@
         title.value = draft.title;
         const desc = el("textarea", { id: "deal-description", name: "description", maxlength: "500", placeholder: "What exactly will be delivered, and by when?" });
         desc.value = draft.description;
-        put(form, 
+        put(form,
           el("p", { class: "q" }, "What's the deal for?"),
           el("p", { class: "muted" }, "Both sides see this, so be specific."),
           el("label", { for: "deal-title" }, "Title"), title,
@@ -846,52 +1023,53 @@
       }
 
       if (step === 2) {
-        const amount = el("input", { id: "deal-amount", name: "amount", type: "number", min: "1", max: "10000", step: "1", inputmode: "numeric", required: true, placeholder: "0" });
+        const amount = el("input", { id: "deal-amount", name: "amount", type: "text", inputmode: "decimal", autocomplete: "off", required: true, placeholder: "0.00" });
         amount.value = draft.amount;
         const note = el("p", { class: "hint" });
         const updateNote = () => {
-          const n = Math.floor(Number(amount.value));
-          if (!n || n < 1) { note.textContent = "Whole credits, from 1 to 10,000."; return; }
-          const fee = Math.floor(n / 100);
-          note.textContent = `The receiver gets ${credits(n - fee)} credits after the 1% fee (${credits(fee)}).`;
+          const cents = parseMoney(amount.value);
+          if (cents === null) { note.textContent = `Between ${fmt(MIN_AMOUNT)} and ${fmt(MAX_AMOUNT)}, in New Zealand dollars.`; return; }
+          const q = quoteFor(cents);
+          note.textContent = `The buyer pays ${fmt(q.buyerTotal)}, including our ${fmt(q.platformFee)} fee. The seller is quoted ${fmt(cents)} and receives about ${fmt(q.sellerNet)} after Stripe's card fee.`;
         };
         amount.addEventListener("input", updateNote);
         updateNote();
-        put(form, 
+        put(form,
           el("p", { class: "q" }, "How much, and how long?"),
-          el("label", { for: "deal-amount" }, "Amount"),
-          el("div", { class: "amount-input" }, amount, el("span", {}, "credits")),
+          el("label", { for: "deal-amount" }, "Amount (NZD)"),
+          el("div", { class: "amount-input" }, el("span", {}, "NZ$"), amount),
           note,
           el("label", {}, "Refund deadline"),
-          el("p", { class: "hint" }, "If the deal isn't finished this long after funding, the sender can take the credits back."),
+          el("p", { class: "hint" }, "If the deal isn't finished this long after the buyer pays, the buyer can cancel and the hold is released."),
           el("div", { class: "chips", role: "group", "aria-label": "Refund deadline" }, DEADLINES.map(([h, label]) =>
             el("button", { type: "button", class: "chip", "aria-pressed": String(draft.deadlineHours === h), onclick: () => { draft.amount = amount.value; draft.deadlineHours = h; draw(); } }, label))),
           nav("Review deal"));
         form.onsubmit = (e) => {
           e.preventDefault();
-          const n = Number(amount.value);
-          if (!Number.isInteger(n) || n < 1 || n > 10000) return flash("Enter a whole number of credits from 1 to 10,000.");
-          draft.amount = String(n);
+          const cents = parseMoney(amount.value);
+          if (cents === null) return flash(`Enter an amount between ${fmt(MIN_AMOUNT)} and ${fmt(MAX_AMOUNT)}.`);
+          draft.amount = amount.value.trim();
           step = 3; draw();
         };
         setTimeout(() => amount.focus(), 0);
       }
 
       if (step === 3) {
-        const n = Number(draft.amount);
-        const fee = Math.floor(n / 100);
+        const n = parseMoney(draft.amount);
+        const q = quoteFor(n);
         const other = typeOptions(app.me.kind).find(([v]) => v === draft.type)[1].toLowerCase();
-        put(form, 
+        put(form,
           el("p", { class: "q" }, "Check the details"),
           el("dl", { class: "review" },
             el("dt", {}, "Deal"), el("dd", {}, draft.title),
             draft.description ? el("dt", {}, "Details") : null, draft.description ? el("dd", {}, draft.description) : null,
             el("dt", {}, "Other side"), el("dd", {}, `${other[0].toUpperCase()}${other.slice(1)} (${TYPE_LABELS[draft.type]})`),
             el("dt", {}, "You are"), el("dd", {}, draft.role === "buyer" ? "Paying (sender)" : "Getting paid (receiver)"),
-            el("dt", {}, "Amount"), el("dd", {}, `${credits(n)} credits`),
-            el("dt", {}, "Receiver gets"), el("dd", {}, `${credits(n - fee)} credits after the 1% fee`),
-            el("dt", {}, "Refund deadline"), el("dd", {}, `${DEADLINES.find(([h]) => h === draft.deadlineHours)[1]} after funding`)),
-          el("p", { class: "hint" }, "Next you'll get a one-time invite code to send to the other side."),
+            el("dt", {}, "Deal amount"), el("dd", {}, fmt(n)),
+            el("dt", {}, draft.role === "buyer" ? "You pay" : "The buyer pays"), el("dd", {}, fmt(q.buyerTotal)),
+            el("dt", {}, draft.role === "seller" ? "You receive, about" : "The seller receives, about"), el("dd", {}, fmt(q.sellerNet)),
+            el("dt", {}, "Refund deadline"), el("dd", {}, `${DEADLINES.find(([h]) => h === draft.deadlineHours)[1]} after the buyer pays`)),
+          el("p", { class: "hint" }, "Next you'll get a one-time invite code to send to the other side. Nobody pays anything until they've joined."),
           nav("Create deal"));
         form.onsubmit = async (e) => {
           e.preventDefault();
@@ -938,16 +1116,15 @@
     function showPreview(p) {
       body.textContent = "";
       flash("");
-      const fee = Math.floor((p.amount * p.feeBps) / 10000);
-      put(body, 
+      put(body,
         el("p", { class: "q" }, p.title),
         p.description ? el("p", { class: "muted" }, p.description) : null,
         el("dl", { class: "review" },
           el("dt", {}, "From"), el("dd", {}, `${p.creator.name} (${kindLabel(p.creator.kind)})`),
           el("dt", {}, "Deal type"), el("dd", {}, TYPE_LABELS[p.type]),
           el("dt", {}, "You'll be"), el("dd", {}, p.yourRole === "buyer" ? "Paying (sender)" : "Getting paid (receiver)"),
-          el("dt", {}, "Amount"), el("dd", {}, `${credits(p.amount)} credits`),
-          el("dt", {}, "Receiver gets"), el("dd", {}, `${credits(p.amount - fee)} credits after the 1% fee`),
+          el("dt", {}, "Amount"), el("dd", {}, `${fmt(p.amount)}`),
+          el("dt", {}, "Receiver gets, about"), el("dd", {}, fmt(quoteFor(p.amount).sellerNet, p.currency)),
           el("dt", {}, "Refund deadline"), el("dd", {}, `${p.deadlineHours} hours after funding`)),
         p.canJoin ? null : el("p", { class: "flash error" }, p.reason),
         el("div", { class: "wiz-nav" },
@@ -1012,7 +1189,7 @@
       el("thead", {}, el("tr", {}, el("th", {}, "Deal"), el("th", {}, "Amount"), el("th", {}, "Outcome"), el("th", {}, "Finished"), el("th", {}, "Took"))),
       el("tbody", {}, past.map((d) => el("tr", {},
         el("td", {}, el("a", { href: "#deal/" + encodeURIComponent(d.id) }, d.title), el("div", { class: "dim" }, `${TYPE_LABELS[d.type]} · ${d.yourRole === "buyer" ? "you paid" : "you were paid"}`)),
-        el("td", { class: "num" }, `${credits(d.amount)} cr`),
+        el("td", { class: "num" }, `${fmt(d.amount)}`),
         el("td", {}, el("span", { class: "badge " + d.state }, STATE_LABELS[d.state])),
         el("td", {}, when(dealEndedAt(d))),
         el("td", {}, duration(Date.parse(dealEndedAt(d)) - Date.parse(d.createdAt))))))));
@@ -1050,10 +1227,49 @@
       draw();
     }
 
+    // True while the buyer has the card form open, so a poll can't tear it down under them.
+    let paying = false;
+
+    async function ask(action, promptText, okText, extra = {}) {
+      const answer = promptText ? prompt(promptText) : "";
+      if (promptText && answer === null) return;
+      busy = true;
+      flash("");
+      try {
+        const payload = { ...extra };
+        if (promptText) payload.note = answer || "";
+        deal = await api("POST", `/deals/${encodeURIComponent(id)}/${action}`, payload, { headers: { "Idempotency-Key": newKey() } });
+        toast(okText);
+      } catch (err) {
+        flash(err.message);
+      } finally {
+        busy = false;
+      }
+      draw();
+    }
+
     function nextPanel() {
       const buyer = deal.yourRole === "buyer";
-      const fee = Math.floor((deal.amount * deal.feeBps) / 10000);
+      const q = deal.quote;
+      const pay = deal.payment;
       const p = el("section", { class: "next" });
+      const supportLink = el("p", { class: "dim" }, "Something wrong? ", el("a", { href: "#support" }, "Open a support ticket"), ".");
+      const disputeButton = () => el("button", { type: "button", class: "btn ghost small", onclick: async () => {
+        const reason = prompt("What's gone wrong? This freezes the deal and sends it to Valence support.");
+        if (reason === null) return;
+        if (reason.trim().length < 10) return flash("Please describe the problem in a sentence or two.");
+        busy = true;
+        try {
+          deal = await api("POST", `/deals/${encodeURIComponent(id)}/dispute`, { reason }, { headers: { "Idempotency-Key": newKey() } });
+          toast("Dispute opened. The deal is frozen.");
+        } catch (err) {
+          flash(err.message);
+        } finally {
+          busy = false;
+        }
+        draw();
+      } }, "Open a dispute");
+
       switch (deal.state) {
         case "open": {
           if (deal.inviteCode) {
@@ -1068,56 +1284,140 @@
           put(p, el("div", { class: "actions" }, confirmButton("Cancel deal", "danger small", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
           break;
         }
+
         case "joined":
-          if (buyer) {
-            const enough = app.me.balance >= deal.amount;
-            put(p, el("h3", {}, `${other().name} joined. Fund escrow to start.`),
-              el("p", {}, `${credits(deal.amount)} credits move from your balance into escrow. Nobody can touch them until you release them, or they're refunded.`),
-              enough ? null : el("p", { class: "flash error" }, `You have ${credits(app.me.balance)} credits, so you need ${credits(deal.amount - app.me.balance)} more.`),
+        case "funding": {
+          if (!buyer) {
+            const ready = app.me.payouts && app.me.payouts.ready;
+            put(p, el("h3", {}, ready ? "You're in. Waiting for the buyer to pay." : "Set up payouts so you can be paid"),
+              ready
+                ? el("p", {}, "Don't start work until the money is held. This page updates by itself.")
+                : el("p", {}, "Stripe needs your details before this deal can be funded. It takes a couple of minutes, and Valence never sees your bank details or your ID."),
+              ready ? el("span", { class: "live" }, "Waiting for payment") : null,
               el("div", { class: "actions" },
-                (() => { const b = el("button", { type: "button", class: "btn", onclick: () => act("fund", "Escrow funded") }, `Fund escrow (${credits(deal.amount)} credits)`); if (!enough) b.disabled = true; return b; })(),
-                confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
-          } else {
-            put(p, el("h3", {}, "You're in. Waiting for the sender to fund escrow."),
-              el("p", {}, "Don't start work until the credits are in escrow. This page updates by itself."),
-              el("span", { class: "live" }, "Waiting for funding"),
-              el("div", { class: "actions" }, confirmButton("Leave and cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+                ready ? null : payoutButton("Set up payouts with Stripe"),
+                confirmButton("Leave and cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+            break;
           }
-          break;
-        case "funded": {
-          const deadline = Date.parse(deal.deadlineAt);
-          const passed = Date.now() >= deadline;
-          if (buyer) {
-            put(p, el("h3", {}, "Credits are in escrow"),
-              el("p", {}, `Release them once you're happy with what ${other().name} delivered. They'll get ${credits(deal.amount - fee)} credits.`),
-              el("div", { class: "actions" },
-                confirmButton("Release funds", "", "Click again to release. This can't be undone", () => act("release", "Funds released")),
-                passed ? el("button", { type: "button", class: "btn secondary", onclick: () => act("refund", "Refund claimed") }, "Claim refund (deadline passed)") : null),
-              el("p", { class: "hint" }, passed ? "The refund deadline has passed, so you can also take the credits back." : `You can claim a refund after ${when(deal.deadlineAt)} if the deal isn't done.`));
+          put(p, el("h3", {}, `${other().name} joined. Pay to start the deal.`),
+            el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`),
+            breakdown(q));
+          if (!paying) {
+            put(p, el("div", { class: "actions" },
+              el("button", { type: "button", class: "btn", onclick: () => { paying = true; draw(); } }, `Pay ${fmt(q.buyerTotal, q.currency)}`),
+              confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
           } else {
-            put(p, el("h3", {}, "Credits are locked in escrow. Time to do the work."),
-              el("p", {}, `When ${other().name} releases them you'll get ${credits(deal.amount - fee)} credits. If you can't finish, refund them instead.`),
-              el("span", { class: "live" }, "Waiting for release"),
-              el("div", { class: "actions" }, confirmButton("Refund the sender", "secondary", "Click again to refund", () => act("refund", "Refunded"))));
+            const slot = el("div", { class: "pay-wrap" }, el("p", { class: "muted" }, "Opening the secure card form\u2026"));
+            put(p, slot);
+            cardForm(id, {
+              onFunded: async () => {
+                paying = false;
+                try {
+                  deal = await api("GET", "/deals/" + encodeURIComponent(id));
+                } catch { /* the poll will catch up */ }
+                toast("Payment held. The deal has started.");
+                draw();
+              },
+            }).then((form) => {
+              if (!paying && !(deal.payment && deal.payment.status === "held")) return;
+              slot.textContent = "";
+              put(slot, form);
+            });
           }
           break;
         }
+
+        case "awaiting_setup": {
+          if (buyer) {
+            put(p, el("h3", {}, "Waiting on the seller"),
+              el("p", {}, `${other() ? other().name : "The seller"} hasn't finished setting up payouts, so there's nowhere for this money to go yet. They've been told. Nothing has been charged.`),
+              el("span", { class: "live" }, "Waiting for their setup"),
+              el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+          } else {
+            put(p, el("h3", {}, "Finish setting up payouts"),
+              el("p", {}, "The buyer is ready to pay, but Stripe needs your details first. Valence never sees your bank details or your ID: Stripe collects and verifies them."),
+              el("div", { class: "actions" }, payoutButton("Continue with Stripe")));
+          }
+          break;
+        }
+
+        case "funded":
+        case "delivered": {
+          const passed = Date.now() >= Date.parse(deal.deadlineAt);
+          const expires = pay && pay.holdExpiresAt ? when(pay.holdExpiresAt) : null;
+          const held = el("p", { class: "held" },
+            `${fmt(pay ? pay.amount : q.buyerTotal, q.currency)} held on ${pay && pay.brand ? cardBrand(pay.brand) : "the buyer's card"}${pay && pay.last4 ? ` ending ${pay.last4}` : ""}.`);
+          if (buyer) {
+            put(p,
+              el("h3", {}, deal.state === "delivered" ? `${other().name} says it's done` : "Your payment is held"),
+              held,
+              deal.state === "delivered"
+                ? el("p", {}, "Check the work, then release. If you do nothing, it releases automatically 72 hours after delivery.")
+                : el("p", {}, `Release it once you're happy with what ${other().name} delivered. They receive about ${fmt(q.sellerNet, q.currency)} after Stripe's processing fee.`),
+              deal.deliveryNote ? el("blockquote", { class: "note" }, deal.deliveryNote) : null,
+              el("div", { class: "actions" },
+                confirmButton("Release the payment", "", "Click again to pay the seller. This can't be undone", () => act("release", "Released. The seller has been paid.")),
+                passed ? el("button", { type: "button", class: "btn secondary", onclick: () => act("refund", "Cancelled. The hold has been released.") }, "Cancel and release the hold") : null,
+                disputeButton()),
+              el("p", { class: "hint" }, passed
+                ? "The deadline has passed, so you can cancel and have the hold released."
+                : `If the deal isn't done by ${when(deal.deadlineAt)} you can cancel and have the hold released.`),
+              expires ? el("p", { class: "hint" }, `The hold on your card lasts until ${expires}${pay && pay.holdAtRisk ? " \u2014 it expires soon, so release or cancel now." : "."}`) : null,
+              supportLink);
+          } else {
+            put(p,
+              el("h3", {}, deal.state === "delivered" ? "Delivered. Waiting for the buyer to release." : "The money is held. Time to do the work."),
+              held,
+              el("p", {}, `When ${other().name} releases it you receive about ${fmt(q.sellerNet, q.currency)}, paid to your bank by Stripe. Stripe's processing fee comes out because you're the merchant on the charge; Valence's fee is paid by the buyer.`),
+              deal.state === "delivered" ? el("span", { class: "live" }, "Releases automatically 72 hours after delivery") : null,
+              el("div", { class: "actions" },
+                deal.state === "funded"
+                  ? el("button", { type: "button", class: "btn", onclick: () => ask("deliver", "Anything to tell the buyer about what you delivered? (optional)", "Marked as delivered.") }, "Mark as delivered")
+                  : null,
+                confirmButton("Cancel and refund the buyer", "secondary", "Click again to refund", () => act("refund", "Refunded. The hold has been released.")),
+                disputeButton()),
+              expires ? el("p", { class: "hint" }, `The buyer's card hold lasts until ${expires}, so this deal has to finish before then.`) : null,
+              supportLink);
+          }
+          break;
+        }
+
+        case "disputed": {
+          const chargeback = deal.dispute && deal.dispute.kind === "chargeback";
+          put(p, el("h3", {}, chargeback ? "The buyer's bank has reversed this payment" : "This deal is in dispute"),
+            el("p", {}, chargeback
+              ? "The buyer raised this with their bank rather than with us. Stripe handles it from here and will ask for evidence."
+              : "The money stays held while we look at it. Add anything useful in a support ticket and we'll come back to you."),
+            deal.dispute && deal.dispute.reason ? el("blockquote", { class: "note" }, deal.dispute.reason) : null,
+            el("div", { class: "actions" }, btnLink("#support", "Open a support ticket", "secondary")));
+          break;
+        }
+
         case "released":
-          put(p, el("h3", {}, "Done. The receiver has been paid."), el("p", {}, `${credits(deal.amount - fee)} credits went to the receiver and ${credits(fee)} to the fee.`));
+          put(p, el("h3", {}, "Done. The seller has been paid."),
+            el("p", {}, pay && pay.sellerNet != null
+              ? `${fmt(pay.sellerNet, q.currency)} went to ${deal.seller ? deal.seller.name : "the seller"} after ${fmt(pay.processorFee, q.currency)} of Stripe processing. Valence's fee was ${fmt(pay.platformFee, q.currency)}.`
+              : `${deal.seller ? deal.seller.name : "The seller"} has been paid. It reaches their bank in a couple of business days.`));
           break;
+
         case "refunded":
-          put(p, el("h3", {}, "Refunded"), el("p", {}, "The sender got all of their credits back."));
+          put(p, el("h3", {}, pay && pay.status === "refunded" ? "Refunded" : "Cancelled, and the hold released"),
+            el("p", {}, pay && pay.status === "refunded"
+              ? "The money has gone back to the card it came from. Banks usually show it within a few business days."
+              : "Nothing was ever charged. The hold on the card has been released, which can take a day or two to disappear from a statement."),
+            pay && pay.cancelReason ? el("p", { class: "hint" }, pay.cancelReason) : null);
           break;
+
         default:
-          put(p, el("h3", {}, "Cancelled"), el("p", {}, "This deal was cancelled before any credits moved."));
+          put(p, el("h3", {}, "Cancelled"), el("p", {}, "This deal was cancelled before anyone paid anything."));
       }
       return p;
     }
 
     function progress() {
-      const order = ["open", "joined", "funded", "released"];
-      const labels = ["Created", "Other side joined", "In escrow", "Released"];
-      const idx = order.indexOf(deal.state);
+      const labels = ["Created", "Other side joined", "Payment held", "Paid out"];
+      const reached = { open: 0, joined: 1, awaiting_setup: 1, funding: 1, funded: 2, delivered: 2, disputed: 2, released: 3 };
+      const idx = reached[deal.state] === undefined ? -1 : reached[deal.state];
       const ended = deal.state === "refunded" || deal.state === "cancelled";
       return el("ol", { class: "progress" }, labels.map((l, i) => {
         let cls = "";
@@ -1130,27 +1430,37 @@
 
     function draw() {
       root.textContent = "";
-      const fee = Math.floor((deal.amount * deal.feeBps) / 10000);
-      put(root, 
+      const q = deal.quote;
+      const pay = deal.payment;
+      put(root,
         el("div", { class: "deal-head" },
           el("h2", {}, deal.title),
           el("span", { class: "badge " + deal.state }, STATE_LABELS[deal.state])),
-        el("p", { class: "muted" }, `${TYPE_LABELS[deal.type]} · ${credits(deal.amount)} credits · ${roleText(deal)}`),
+        el("p", { class: "muted" }, `${TYPE_LABELS[deal.type]} \u00b7 ${fmt(deal.amount, deal.currency)} \u00b7 ${roleText(deal)}`),
         deal.description ? el("p", {}, deal.description) : null,
         progress(),
         nextPanel(),
         el("section", { class: "card" },
           el("h2", {}, "Details"),
           el("dl", { class: "facts" },
-            el("dt", {}, "Sender (pays)"), el("dd", {}, partyName(deal.buyer)),
-            el("dt", {}, "Receiver (gets paid)"), el("dd", {}, partyName(deal.seller)),
-            el("dt", {}, "Amount"), el("dd", {}, `${credits(deal.amount)} credits`),
-            el("dt", {}, "Fee"), el("dd", {}, `${credits(fee)} credits (1%, from the receiver's payout)`),
-            el("dt", {}, "Refund deadline"), el("dd", {}, deal.deadlineAt ? when(deal.deadlineAt) : `${deal.deadlineHours} hours after funding`),
+            el("dt", {}, "Buyer (pays)"), el("dd", {}, partyName(deal.buyer)),
+            el("dt", {}, "Seller (gets paid)"), el("dd", {}, partyName(deal.seller)),
+            el("dt", {}, "Deal amount"), el("dd", {}, fmt(deal.amount, deal.currency)),
+            el("dt", {}, "Buyer pays"), el("dd", {}, fmt(q.buyerTotal, q.currency)),
+            el("dt", {}, "Valence fee"), el("dd", {}, `${fmt(q.platformFee, q.currency)} (1%, paid by the buyer)`),
+            el("dt", {}, "Card processing"), el("dd", {}, pay && pay.processorFee != null
+              ? `${fmt(pay.processorFee, q.currency)} (Stripe, paid by the seller)`
+              : `about ${fmt(q.processorFee, q.currency)} (Stripe, paid by the seller)`),
+            el("dt", {}, "Seller receives"), el("dd", {}, pay && pay.sellerNet != null
+              ? fmt(pay.sellerNet, q.currency)
+              : `about ${fmt(q.sellerNet, q.currency)}`),
+            el("dt", {}, "Refund deadline"), el("dd", {}, deal.deadlineAt ? when(deal.deadlineAt) : `${deal.deadlineHours} hours after payment`),
+            pay && pay.holdExpiresAt ? el("dt", {}, "Card hold expires") : null,
+            pay && pay.holdExpiresAt ? el("dd", {}, when(pay.holdExpiresAt)) : null,
             el("dt", {}, "Deal ID"), el("dd", { class: "code" }, deal.id)),
           el("details", { class: "more" }, el("summary", {}, "History"),
             el("ul", { class: "timeline" }, deal.history.map((h) => el("li", {}, `${when(h.at)}: ${STATE_LABELS[h.state] || h.state} (by ${nameOf(h.by)})`))))),
-        el("p", { class: "dim" }, "Problem with this deal? ", el("a", { href: "#support" }, "Open a support ticket"), "."));
+        el("p", { class: "dim" }, "The money is held by Stripe, never by Valence. ", el("a", { href: "#faq" }, "How this works"), "."));
     }
     draw();
 
@@ -1161,18 +1471,120 @@
       if (!alive(gen) || busy) return;
       if (JSON.stringify(fresh) === JSON.stringify(deal)) return;
       const before = deal.state;
+      // Never tear down the card form under someone who is typing into it.
+      if (paying && fresh.state === before) {
+        deal = fresh;
+        return;
+      }
       deal = fresh;
       await refreshMe();
       if (before !== deal.state) {
+        paying = false;
         const who = other() ? other().name : "The other side";
-        const msg = { joined: `${who} joined the deal`, funded: "Escrow is funded", released: "Funds released", refunded: "Credits refunded", cancelled: "The deal was cancelled" }[deal.state];
+        const msg = {
+          joined: `${who} joined the deal`,
+          awaiting_setup: "Waiting on the seller's payout setup",
+          funded: "Payment held. The deal has started.",
+          delivered: `${who} marked the deal as delivered`,
+          disputed: "This deal is now in dispute",
+          released: "Released. The seller has been paid.",
+          refunded: "The hold has been released",
+          cancelled: "The deal was cancelled",
+        }[deal.state];
         if (msg) toast(msg);
       }
       draw();
     });
   }
 
-  // ---------- support ----------
+  // ---------- payments: what has moved, never what is "available" ----------
+  async function viewPayments(view, _arg, gen) {
+    const [history, payouts] = await Promise.all([api("GET", "/payments"), api("GET", "/payouts")]);
+    if (!alive(gen)) return;
+    const LABELS = {
+      payment_started: "Payment started",
+      funds_held: "Payment held",
+      payment_failed: "Payment failed",
+      released: "Released to the seller",
+      paid_out: "Paid out to you",
+      hold_released: "Hold released",
+      refunded: "Refunded",
+      delivered: "Marked delivered",
+      dispute_opened: "Dispute opened",
+      chargeback: "Chargeback",
+      payouts_started: "Payout setup started",
+      payouts_ready: "Payouts ready",
+    };
+    put(view, payoutsCard(payouts));
+    if (!history.events.length) {
+      put(view, el("section", { class: "card" },
+        emptyState("Nothing here yet", "Once a deal is funded, every movement shows up here with the deal it belongs to.",
+          btnLink("#new", "Start a deal"))));
+      return;
+    }
+    const csv = el("a", { class: "btn ghost small", href: "#" }, icon("doc"), "Export CSV");
+    csv.addEventListener("click", async (e) => {
+      e.preventDefault();
+      await downloadAuth("/v1/payments.csv", "valence-payments.csv");
+    });
+    put(view, el("section", { class: "card" },
+      el("div", { class: "card-head" }, el("h2", {}, "Payments"), csv),
+      el("table", {},
+        el("thead", {}, el("tr", {}, el("th", {}, "When"), el("th", {}, "What"), el("th", {}, "Deal"), el("th", { class: "num" }, "Amount"))),
+        el("tbody", {}, history.events.map((e) => el("tr", {},
+          el("td", {}, when(e.at)),
+          el("td", {}, LABELS[e.event] || e.event, e.detail ? el("span", { class: "s" }, e.detail) : null),
+          el("td", {}, e.dealId ? el("a", { href: "#deal/" + encodeURIComponent(e.dealId) }, e.dealId.slice(0, 12)) : "\u2014"),
+          el("td", { class: "num" + (e.direction === "in" ? " in" : e.direction === "out" ? " out" : "") },
+            e.amount == null ? "\u2014" : `${e.direction === "out" ? "\u2212" : e.direction === "in" ? "+" : ""}${fmt(e.amount, e.currency || history.currency)}`)))))),
+      el("p", { class: "dim" }, "These are completed movements, past tense. Valence holds no balance for you: every payment belongs to one deal."));
+  }
+
+  // Shown on the payments page and in settings.
+  function payoutsCard(payouts) {
+    if (!payouts.enabled) {
+      return el("section", { class: "card" }, el("h2", {}, "Getting paid"),
+        el("p", { class: "muted" }, "Card payments aren't switched on for this server yet."));
+    }
+    const refresh = el("button", { type: "button", class: "btn ghost small" }, "Check again");
+    refresh.addEventListener("click", async () => {
+      refresh.disabled = true;
+      try {
+        await api("POST", "/payouts/refresh", {}, { headers: { "Idempotency-Key": newKey() } });
+        await refreshMe();
+        route();
+      } catch (err) {
+        flash(err.message);
+        refresh.disabled = false;
+      }
+    });
+    const body = el("section", { class: "card" }, el("h2", {}, "Getting paid"));
+    if (payouts.ready) {
+      put(body,
+        el("div", { class: "set-row" }, el("span", {}, "Payouts"), el("strong", { class: "ok" }, "Ready")),
+        el("p", { class: "muted" }, "Stripe has verified you and will pay released deals to your bank, usually within two business days. Valence never holds your money and never sees your bank details."),
+        el("div", { class: "actions" }, payoutButton("Manage at Stripe", "secondary"), refresh));
+    } else if (payouts.started) {
+      put(body,
+        el("div", { class: "set-row" }, el("span", {}, "Payouts"), el("strong", { class: "warn" }, payouts.detailsSubmitted ? "Stripe is still checking" : "Not finished")),
+        el("p", { class: "muted" }, payouts.detailsSubmitted
+          ? "Stripe has your details and is verifying them. This is usually quick, but can take a day."
+          : "You started setting up payouts but didn't finish. Deals can't be funded until Stripe has what it needs."),
+        el("div", { class: "actions" }, payoutButton(payouts.detailsSubmitted ? "Check at Stripe" : "Finish setting up"), refresh));
+    } else {
+      put(body,
+        el("div", { class: "set-row" }, el("span", {}, "Payouts"), el("strong", {}, "Not set up")),
+        el("p", { class: "muted" }, `Before anyone can pay you, Stripe needs your name, date of birth, address and bank details. You enter them on Stripe's own pages: Valence never sees them, and Stripe holds the money, not us. Deals have to finish within ${payouts.holdDays} days because that's how long a card hold lasts.`),
+        el("div", { class: "actions" }, payoutButton("Set up payouts with Stripe")));
+    }
+    if (payouts.awaitingSetup && payouts.awaitingSetup.length) {
+      put(body, el("p", { class: "flash warn" },
+        `${payouts.awaitingSetup.length} deal${payouts.awaitingSetup.length === 1 ? " is" : "s are"} waiting on this before the buyer can pay.`));
+    }
+    return body;
+  }
+
+  // ---------- support ----------  // ---------- support ----------
   async function viewSupport(view, _arg, gen) {
     const [info, list, dealsRes] = await Promise.all([api("GET", "/support"), api("GET", "/tickets"), api("GET", "/deals")]);
     if (!alive(gen)) return;
@@ -1335,13 +1747,14 @@
 
   // ---------- FAQ ----------
   const FAQ = [
-    ["What is Valence MM?", "An automated escrow middleman. It holds the payment for a deal until both sides have done their part, then releases it to the receiver or returns it to the sender."],
-    ["How does a deal work?", "The creator picks who they're dealing with, the amount and a refund deadline, then sends a one-time invite code. The other side joins, the sender funds escrow, and the sender releases the credits when happy."],
+    ["What is Valence MM?", "A middleman for deals between people and AI agents. The buyer's payment is held until both sides have done their part, then it goes to the seller or back to the buyer."],
+    ["Where is my money while a deal runs?", "Nowhere near Valence. The buyer's card is authorised but not charged, so the money stays with the buyer's own bank. Valence can't spend it and can't take it. Releasing the deal is what actually charges the card, and Stripe pays the seller directly."],
+    ["How does a deal work?", "The creator picks who they're dealing with, the amount and a refund deadline, then sends a one-time invite code. The other side joins, the buyer pays by card, and the buyer releases it when happy. The seller can mark a deal delivered, and it releases on its own 72 hours later if the buyer says nothing."],
     ["Can AI agents use it on their own?", "Yes. Agents register for an API key and can create, join, fund and release deals entirely through the JSON API. See the API docs."],
-    ["Is this real money?", "Not yet. The prototype runs on play credits only, so you can test safely. Real crypto deposits come later, once the safety and legal side is in place."],
-    ["What if the other side never delivers?", "The receiver can refund you at any time. If they don't, you can claim your credits back once the deal's refund deadline has passed."],
-    ["How are disputes handled?", "For now the sender decides when to release, with the deadline as a backstop. If something goes wrong, open a support ticket and we'll look at it. Independent dispute resolution is on the roadmap."],
-    ["What does it cost?", "A flat 1% fee, taken from the receiver's payout when funds are released. Refunds and cancellations are free."],
+    ["Why do deals have to finish within 7 days?", "Because that's how long a card authorisation lasts. Holding the money on the buyer's card instead of in an account is what keeps this safe, and the trade-off is that deals can't run longer than the hold."],
+    ["What if the other side never delivers?", "The seller can refund you at any time. If they don't, you can cancel once the deal's refund deadline has passed, and the hold on your card is released: nothing was ever charged."],
+    ["How are disputes handled?", "Either side can open a dispute, which freezes the deal. Valence reads both sides and decides to release, refund or split. The money stays held throughout."],
+    ["What does it cost?", "Valence takes 1%, paid by the buyer on top of the deal amount, and returns it in full if the deal is cancelled or refunded. Stripe's card processing fee is paid by the seller, as it would be for any merchant. Every number is shown before anyone pays."],
     ["Do I need to refresh to see updates?", "No. Deal pages and support tickets update by themselves every few seconds."],
   ];
   function viewFaq(view) {
@@ -1622,16 +2035,20 @@
       } }, l));
     }
 
-    put(view, 
+    put(view,
       el("section", { class: "card" },
         el("h2", {}, "Profile"),
         el("div", { class: "set-row" }, el("span", {}, me.kind === "agent" ? "Agent name" : "Username"), el("strong", {}, me.name)),
         el("div", { class: "set-row" }, el("span", {}, "Account type"), el("strong", {}, me.kind === "agent" ? "AI agent" : "Person")),
         el("div", { class: "set-row" }, el("span", {}, "Account ID"), el("div", { class: "row" }, el("code", {}, me.accountId), copyButton(me.accountId, "Copy"))),
-        el("div", { class: "set-row" }, el("span", {}, "Balance"), el("strong", { class: "num" }, `${credits(me.balance)} play credits`))),
+        el("div", { class: "set-row" }, el("span", {}, "Currency"), el("strong", {}, "New Zealand dollars"))),
       el("section", { class: "card" },
         el("h2", {}, "Appearance"),
         el("div", { class: "set-row" }, el("span", {}, "Theme"), seg)));
+
+    try {
+      put(view, payoutsCard(await api("GET", "/payouts")));
+    } catch { /* the payments page shows this too */ }
 
     if (me.kind === "human") {
       put(view, securitySection(gen));
@@ -1652,20 +2069,6 @@
       put(view, el("section", { class: "card" }, el("h2", {}, "API key"),
         el("p", { class: "muted" }, "Your API key was shown once when this agent was created, and it's how the agent signs in. Keep it secret. If it's lost, register a new agent."),
         el("a", { href: "/docs" }, "API docs")));
-    }
-
-    if (health && health.testCredits) {
-      const form = el("form", {},
-        el("h2", {}, "Add test credits"),
-        el("p", { class: "muted" }, "Have a test code? It adds play credits to your balance."),
-        el("div", { class: "row" }, el("input", { name: "code", autocomplete: "off", placeholder: "Test code", required: true, "aria-label": "Test code" }), el("button", { type: "submit", class: "btn" }, "Add")));
-      bindForm(form, async (f) => {
-        const r = await api("POST", "/credits/redeem", { code: val(f, "code") });
-        f.reset();
-        setBalance(r.balance);
-        flash(`Added ${r.added} test credits.`, "ok");
-      });
-      put(view, el("section", { class: "card" }, form));
     }
 
     put(view, el("section", { class: "card" }, el("h2", {}, "Sign out"),

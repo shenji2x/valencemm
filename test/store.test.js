@@ -1,25 +1,38 @@
-// Tests for the deal and ledger logic. These need no network and no express.
+// Tests for the deal and payment-record logic. No network, no Stripe: the store records what a
+// provider did, so these tests call the same primitives src/payments.js calls.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createStore } = require("../src/store");
+const money = require("../src/money");
 
 function setup() {
   const clock = { t: Date.parse("2026-10-17T00:00:00Z") };
   const store = createStore({ now: () => clock.t });
   const agent = (name) => {
     const r = store.registerAgent(name);
-    return { ...r, rec: store.authenticate(r.apiKey) };
+    const rec = store.authenticate(r.apiKey);
+    return { ...r, rec };
   };
-  return { store, clock, agent };
+  // A seller can only be paid once Stripe says so, so tests have to say so too.
+  const ready = (who) => {
+    store.setConnectAccount(who.rec, "acct_" + who.rec.id.slice(-8));
+    store.updateConnectStatus(who.rec, { chargesEnabled: true, payoutsEnabled: true, detailsSubmitted: true });
+    return who;
+  };
+  return { store, clock, agent, ready };
 }
 
-function funded(ctx, amount = 50, extra = {}) {
+// Walks a deal to "funded" the way payments.js does: price it, attach the intent Stripe made,
+// then record that the card was authorised.
+function funded(ctx, amount = 5000, extra = {}) {
   const buyer = ctx.agent("buyer");
-  const seller = ctx.agent("seller");
+  const seller = ctx.ready(ctx.agent("seller"));
   const deal = ctx.store.createDeal(buyer.rec, { title: "Job", amount, ...extra });
   ctx.store.joinDeal(seller.rec, deal.inviteCode);
-  ctx.store.fundDeal(buyer.rec, deal.id);
-  return { buyer, seller, dealId: deal.id };
+  const { deal: rec, quote } = ctx.store.beginFunding(buyer.rec, deal.id);
+  ctx.store.attachIntent(rec, { provider: "stripe", intentId: "pi_" + deal.id.slice(-8), stripeAccountId: seller.rec.connect.stripeAccountId, quote });
+  ctx.store.markHeld(rec, { brand: "visa", last4: "4242" });
+  return { buyer, seller, dealId: deal.id, deal: rec, quote };
 }
 
 const code = (fn) => {
@@ -27,83 +40,193 @@ const code = (fn) => {
   return "no error";
 };
 
-test("register returns a key that authenticates, with 100 credits; key is not stored in plain text", () => {
+test("registering gives a working key, no balance of any kind, and never stores the key", () => {
   const { store, agent } = setup();
   const a = agent("alpha");
   assert.match(a.apiKey, /^vlc_[0-9a-f]{48}$/);
-  assert.equal(a.rec.balance, 100);
+  // The absence of these is the whole regulatory position, so assert it rather than assume it.
+  assert.equal(a.rec.balance, undefined);
+  assert.equal("balance" in store.me(a.rec), false);
+  assert.equal(store.me(a.rec).payouts.ready, false);
   assert.equal(store.authenticate("vlc_wrong"), null);
   assert.equal(store.authenticate(undefined), null);
   assert.equal(JSON.stringify(a.rec).includes(a.apiKey), false);
   assert.equal(JSON.stringify(store.me(a.rec)).includes(a.apiKey), false);
 });
 
-test("happy path: release pays the seller and the ledger balances", () => {
-  const ctx = setup();
-  const { buyer, seller, dealId } = funded(ctx, 50);
-  assert.equal(buyer.rec.balance, 50);
-  const d = ctx.store.releaseDeal(buyer.rec, dealId);
-  assert.equal(d.state, "released");
-  assert.equal(seller.rec.balance, 150); // fee = floor(50 * 1%) = 0
-  assert.equal(ctx.store.audit().ok, true);
-});
-
-test("fee is floor(amount * 1%): 99 -> 0, 100 -> 1, 1999 -> 19", () => {
-  const ctx = setup();
-  for (const [amount, expectedPayout] of [[99, 99], [100, 99], [1999, 1980]]) {
-    const buyer = ctx.agent("b");
-    const seller = ctx.agent("s");
-    buyer.rec.balance += amount; // test-only top-up so the buyer can afford big amounts (this test doesn't check the audit)
-    const d = ctx.store.createDeal(buyer.rec, { title: "t", amount });
-    ctx.store.joinDeal(seller.rec, d.inviteCode);
-    ctx.store.fundDeal(buyer.rec, d.id);
-    const before = seller.rec.balance;
-    ctx.store.releaseDeal(buyer.rec, d.id);
-    assert.equal(seller.rec.balance - before, expectedPayout);
+test("no API anywhere hands out a balance or a way to top one up", () => {
+  const { store } = setup();
+  for (const gone of ["fundDeal", "releaseDeal", "refundDeal", "redeemCredits", "audit_balances"]) {
+    assert.equal(typeof store[gone], "undefined", `${gone} should no longer exist`);
   }
 });
 
-test("seller can refund any time; buyer only after the deadline", () => {
+test("a deal cannot be funded until Stripe says the seller can be paid", () => {
   const ctx = setup();
-  const { buyer, seller, dealId } = funded(ctx, 40, { deadlineHours: 2 });
-  assert.equal(code(() => ctx.store.refundDeal(buyer.rec, dealId)), "403:deadline_not_reached");
-  ctx.clock.t += 3 * 3600 * 1000;
-  assert.equal(ctx.store.refundDeal(buyer.rec, dealId).state, "refunded");
-  assert.equal(buyer.rec.balance, 100);
-  assert.equal(seller.rec.balance, 100);
+  const buyer = ctx.agent("buyer");
+  const seller = ctx.agent("seller");
+  const deal = ctx.store.createDeal(buyer.rec, { title: "Job", amount: 5000 });
+  ctx.store.joinDeal(seller.rec, deal.inviteCode);
+  // Taking a buyer's money with nowhere to send it is the worst failure available here.
+  assert.equal(code(() => ctx.store.beginFunding(buyer.rec, deal.id)), "409:seller_not_ready");
+  assert.equal(ctx.store.getDeal(buyer.rec, deal.id).state, "awaiting_setup");
+  assert.deepEqual(ctx.store.dealsAwaitingSetup(seller.rec.id).map((d) => d.id), [deal.id]);
 
-  const second = funded(ctx, 10);
-  assert.equal(ctx.store.refundDeal(second.seller.rec, second.dealId).state, "refunded");
-  assert.equal(second.buyer.rec.balance, 100);
+  ctx.store.setConnectAccount(seller.rec, "acct_123");
+  ctx.store.updateConnectStatus(seller.rec, { chargesEnabled: true, payoutsEnabled: false, detailsSubmitted: true });
+  assert.equal(code(() => ctx.store.beginFunding(buyer.rec, deal.id)), "409:seller_not_ready");
+
+  ctx.store.updateConnectStatus(seller.rec, { chargesEnabled: true, payoutsEnabled: true, detailsSubmitted: true });
+  // The moment Stripe says yes, the waiting deal is payable again rather than stuck.
+  assert.equal(ctx.store.getDeal(buyer.rec, deal.id).state, "joined");
+  assert.deepEqual(ctx.store.dealsAwaitingSetup(seller.rec.id), []);
+  const { quote } = ctx.store.beginFunding(buyer.rec, deal.id);
+  assert.equal(quote.amount, 5000);
+  assert.equal(ctx.store.getDeal(buyer.rec, deal.id).state, "funding");
+});
+
+test("the quote the buyer is shown is the one the deal carries", () => {
+  const ctx = setup();
+  const { dealId, buyer, quote } = funded(ctx, 50000);
+  const view = ctx.store.getDeal(buyer.rec, dealId);
+  assert.equal(quote.amount, 50000);
+  assert.equal(quote.platformFee, 500);              // 1%
+  assert.equal(quote.buyerTotal, 50500);             // the buyer pays the fee on top
+  assert.equal(view.payment.amount, 50500);
+  assert.equal(view.payment.platformFee, 500);
+  assert.equal(view.payment.status, "held");
+  assert.equal(view.payment.last4, "4242");
+  // Nothing has settled, so there is no seller figure yet beyond the estimate.
+  assert.equal(view.payment.sellerNet, null);
+  assert.equal(view.quote.sellerNet, 50000 - quote.processorFee);
+});
+
+test("releasing records what Stripe actually took, not what we estimated", () => {
+  const ctx = setup();
+  const { buyer, seller, dealId, deal } = funded(ctx, 50000);
+  ctx.store.beginRelease(buyer.rec, dealId);
+  ctx.store.markReleased(deal, buyer.rec.id, { processorFee: 1393, sellerNet: 48607 });
+  const view = ctx.store.getDeal(seller.rec, dealId);
+  assert.equal(view.state, "released");
+  assert.equal(view.payment.status, "captured");
+  assert.equal(view.payment.processorFee, 1393);
+  assert.equal(view.payment.sellerNet, 48607);
+  // The seller's history shows the payout; the buyer's shows the charge.
+  assert.equal(ctx.store.payments(seller.rec).events[0].event, "paid_out");
+  assert.equal(ctx.store.payments(seller.rec).events[0].amount, 48607);
+  assert.equal(ctx.store.payments(buyer.rec).events[0].event, "released");
   assert.equal(ctx.store.audit().ok, true);
 });
 
-test("the deadline runs from funding, not creation", () => {
+test("a deal's deadline can never outlive the card hold", () => {
+  const ctx = setup();
+  // 7 days is the hold; ask for 7 days and the deadline lands on the hold's expiry, not past it.
+  const { deal } = funded(ctx, 5000, { deadlineHours: 168 });
+  assert.equal(deal.deadlineAt, money.holdExpiry(deal.payment.authorizedAt));
+
+  const short = funded(ctx, 5000, { deadlineHours: 2 });
+  assert.equal(short.deal.deadlineAt - short.deal.payment.authorizedAt, 2 * 3600 * 1000);
+});
+
+test("the deadline runs from the payment, not from creating the deal", () => {
   const ctx = setup();
   const buyer = ctx.agent("b");
-  const seller = ctx.agent("s");
-  const d = ctx.store.createDeal(buyer.rec, { title: "t", amount: 10, deadlineHours: 1 });
+  const seller = ctx.ready(ctx.agent("s"));
+  const d = ctx.store.createDeal(buyer.rec, { title: "t", amount: 5000, deadlineHours: 1 });
   ctx.store.joinDeal(seller.rec, d.inviteCode);
-  ctx.clock.t += 5 * 3600 * 1000; // sits unfunded for 5 hours
-  const f = ctx.store.fundDeal(buyer.rec, d.id);
-  assert.equal(Date.parse(f.deadlineAt) - Date.parse(f.fundedAt), 3600 * 1000);
-  assert.equal(code(() => ctx.store.refundDeal(buyer.rec, d.id)), "403:deadline_not_reached");
+  ctx.clock.t += 5 * 3600 * 1000; // sits unpaid for 5 hours
+  const { deal, quote } = ctx.store.beginFunding(buyer.rec, d.id);
+  ctx.store.attachIntent(deal, { provider: "stripe", intentId: "pi_1", stripeAccountId: "acct_1", quote });
+  const held = ctx.store.markHeld(deal);
+  assert.equal(held.deadlineAt - held.fundedAt, 3600 * 1000);
+  assert.equal(code(() => ctx.store.beginRefund(buyer.rec, d.id)), "403:deadline_not_reached");
 });
 
-test("permissions: only the buyer funds/releases; outsiders see 404; no double release", () => {
+test("the seller can refund any time; the buyer only after the deadline", () => {
   const ctx = setup();
-  const { buyer, seller, dealId } = funded(ctx, 20);
+  const { buyer, dealId, deal } = funded(ctx, 4000, { deadlineHours: 2 });
+  assert.equal(code(() => ctx.store.beginRefund(buyer.rec, dealId)), "403:deadline_not_reached");
+  ctx.clock.t += 3 * 3600 * 1000;
+  const { captured } = ctx.store.beginRefund(buyer.rec, dealId);
+  assert.equal(captured, false); // nothing settled, so this is a cancelled hold, not a refund
+  ctx.store.markRefunded(deal, buyer.rec.id, { reason: "deadline passed" });
+  assert.equal(ctx.store.getDeal(buyer.rec, dealId).payment.status, "canceled");
+
+  const second = funded(ctx, 1000);
+  assert.equal(ctx.store.beginRefund(second.seller.rec, second.dealId).captured, false);
+});
+
+test("delivery, then release; and nobody else can do either", () => {
+  const ctx = setup();
+  const { buyer, seller, dealId, deal } = funded(ctx, 20000);
   const outsider = ctx.agent("outsider");
-  assert.equal(code(() => ctx.store.releaseDeal(seller.rec, dealId)), "403:not_buyer");
+  assert.equal(code(() => ctx.store.markDelivered(buyer.rec, dealId)), "403:not_seller");
+  assert.equal(code(() => ctx.store.beginRelease(seller.rec, dealId)), "403:not_buyer");
   assert.equal(code(() => ctx.store.getDeal(outsider.rec, dealId)), "404:deal_not_found");
-  assert.equal(code(() => ctx.store.releaseDeal(outsider.rec, dealId)), "404:deal_not_found");
-  assert.equal(code(() => ctx.store.cancelDeal(outsider.rec, dealId)), "404:deal_not_found");
-  assert.equal(ctx.store.getDeal(seller.rec, dealId).yourRole, "seller");
-  ctx.store.releaseDeal(buyer.rec, dealId);
-  assert.equal(code(() => ctx.store.releaseDeal(buyer.rec, dealId)), "409:bad_state");
-  assert.equal(code(() => ctx.store.refundDeal(seller.rec, dealId)), "409:bad_state");
-  assert.equal(seller.rec.balance, 120);
-  assert.equal(ctx.store.audit().ok, true);
+  assert.equal(code(() => ctx.store.beginRelease(outsider.rec, dealId)), "404:deal_not_found");
+
+  const delivered = ctx.store.markDelivered(seller.rec, dealId, "Three files, see the link");
+  assert.equal(delivered.state, "delivered");
+  assert.equal(ctx.store.beginRelease(buyer.rec, dealId).payment.status, "held");
+  ctx.store.markReleased(deal, buyer.rec.id, { processorFee: 570, sellerNet: 19430 });
+  assert.equal(code(() => ctx.store.beginRelease(buyer.rec, dealId)), "409:bad_state");
+  assert.equal(code(() => ctx.store.beginRefund(seller.rec, dealId)), "409:bad_state");
+});
+
+test("a delivered deal becomes due for auto-release, and an unreleased one does not", () => {
+  const ctx = setup();
+  const { seller, dealId } = funded(ctx, 5000);
+  const WINDOW = 72 * 3600 * 1000;
+  assert.deepEqual(ctx.store.dealsDueForAutoRelease(WINDOW), []); // not delivered yet
+  ctx.store.markDelivered(seller.rec, dealId);
+  assert.deepEqual(ctx.store.dealsDueForAutoRelease(WINDOW), []); // delivered, but not yet stale
+  ctx.clock.t += WINDOW;
+  assert.deepEqual(ctx.store.dealsDueForAutoRelease(WINDOW).map((d) => d.id), [dealId]);
+});
+
+test("a hold close to expiry is reported so it can be cancelled rather than left to lapse", () => {
+  const ctx = setup();
+  const { dealId } = funded(ctx, 5000, { deadlineHours: 168 });
+  assert.deepEqual(ctx.store.dealsWithExpiringHolds(), []);
+  ctx.clock.t += money.HOLD_MS - money.HOLD_SAFETY_MS;
+  assert.deepEqual(ctx.store.dealsWithExpiringHolds().map((d) => d.id), [dealId]);
+  assert.equal(ctx.store.audit().holdsAtRisk, 1);
+});
+
+test("a webhook arriving twice does not fund, release or refund twice", () => {
+  const ctx = setup();
+  const { buyer, dealId, deal } = funded(ctx, 5000);
+  const history = () => ctx.store.getDeal(buyer.rec, dealId).history.filter((h) => h.state === "funded").length;
+  assert.equal(history(), 1);
+  ctx.store.markHeld(deal, { brand: "visa", last4: "4242" }); // Stripe retries
+  assert.equal(history(), 1);
+  ctx.store.markReleased(deal, buyer.rec.id, { processorFee: 165, sellerNet: 4835 });
+  ctx.store.markReleased(deal, buyer.rec.id, { processorFee: 999, sellerNet: 1 });
+  const view = ctx.store.getDeal(buyer.rec, dealId);
+  assert.equal(view.payment.processorFee, 165); // the second call changed nothing
+  assert.equal(view.history.filter((h) => h.state === "released").length, 1);
+});
+
+test("a chargeback freezes the deal and is recorded against the seller", () => {
+  const ctx = setup();
+  const { seller, dealId, deal } = funded(ctx, 5000);
+  ctx.store.recordChargeback(deal, "fraudulent");
+  const view = ctx.store.getDeal(seller.rec, dealId);
+  assert.equal(view.state, "disputed");
+  assert.equal(view.dispute.kind, "chargeback");
+  assert.equal(ctx.store.payments(seller.rec).events[0].event, "chargeback");
+});
+
+test("either side can dispute a funded deal, and the reason has to say something", () => {
+  const ctx = setup();
+  const { buyer, seller, dealId } = funded(ctx, 5000);
+  assert.equal(code(() => ctx.store.openDispute(buyer.rec, dealId, "bad")), "400:invalid_reason");
+  const d = ctx.store.openDispute(buyer.rec, dealId, "The files never arrived and they've stopped replying.");
+  assert.equal(d.state, "disputed");
+  assert.equal(ctx.store.getDeal(seller.rec, dealId).state, "disputed");
+  // A frozen deal can't be quietly released or refunded around the dispute.
+  assert.equal(code(() => ctx.store.beginRelease(buyer.rec, dealId)), "409:bad_state");
+  assert.equal(code(() => ctx.store.beginRefund(seller.rec, dealId)), "409:bad_state");
 });
 
 test("invite codes: single use, case-insensitive, hidden from others, creator can't join", () => {
@@ -111,7 +234,7 @@ test("invite codes: single use, case-insensitive, hidden from others, creator ca
   const a = ctx.agent("a");
   const b = ctx.agent("b");
   const c = ctx.agent("c");
-  const d = ctx.store.createDeal(a.rec, { title: "t", amount: 5, role: "seller" });
+  const d = ctx.store.createDeal(a.rec, { title: "t", amount: 5000, role: "seller" });
   assert.match(d.inviteCode, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
   assert.equal(code(() => ctx.store.joinDeal(a.rec, d.inviteCode)), "400:own_deal");
   const j = ctx.store.joinDeal(b.rec, d.inviteCode.toLowerCase());
@@ -122,27 +245,24 @@ test("invite codes: single use, case-insensitive, hidden from others, creator ca
   assert.equal(code(() => ctx.store.joinDeal(c.rec, 12345)), "404:invalid_invite");
 });
 
-test("funding needs a counterparty and enough credits", () => {
+test("only the buyer can start funding, and only a joined deal", () => {
   const ctx = setup();
   const a = ctx.agent("a");
-  const b = ctx.agent("b");
-  const small = ctx.store.createDeal(a.rec, { title: "t", amount: 5 });
-  assert.equal(code(() => ctx.store.fundDeal(a.rec, small.id)), "409:bad_state");
-  const big = ctx.store.createDeal(a.rec, { title: "big", amount: 5000 });
-  ctx.store.joinDeal(b.rec, big.inviteCode);
-  assert.equal(code(() => ctx.store.fundDeal(a.rec, big.id)), "402:insufficient_credits");
-  assert.equal(a.rec.balance, 100);
-  assert.equal(code(() => { ctx.store.joinDeal(b.rec, small.inviteCode); ctx.store.fundDeal(b.rec, small.id); }), "403:not_buyer");
+  const b = ctx.ready(ctx.agent("b"));
+  const alone = ctx.store.createDeal(a.rec, { title: "t", amount: 5000 });
+  assert.equal(code(() => ctx.store.beginFunding(a.rec, alone.id)), "409:bad_state");
+  ctx.store.joinDeal(b.rec, alone.inviteCode);
+  assert.equal(code(() => ctx.store.beginFunding(b.rec, alone.id)), "403:not_buyer");
 });
 
 test("cancel works before funding but not after, and kills the invite", () => {
   const ctx = setup();
   const a = ctx.agent("a");
   const z = ctx.agent("z");
-  const d = ctx.store.createDeal(a.rec, { title: "t", amount: 5 });
+  const d = ctx.store.createDeal(a.rec, { title: "t", amount: 5000 });
   assert.equal(ctx.store.cancelDeal(a.rec, d.id).state, "cancelled");
   assert.equal(code(() => ctx.store.joinDeal(z.rec, d.inviteCode)), "404:invalid_invite");
-  const { buyer, dealId } = funded(ctx, 10);
+  const { buyer, dealId } = funded(ctx, 5000);
   assert.equal(code(() => ctx.store.cancelDeal(buyer.rec, dealId)), "409:bad_state");
 });
 
@@ -151,17 +271,18 @@ test("input validation", () => {
   const a = agent("a");
   const bad = (input) => code(() => store.createDeal(a.rec, input));
   assert.equal(bad({ title: "t", amount: 0 }), "400:invalid_amount");
-  assert.equal(bad({ title: "t", amount: 1.5 }), "400:invalid_amount");
-  assert.equal(bad({ title: "t", amount: "5" }), "400:invalid_amount");
-  assert.equal(bad({ title: "t", amount: 10001 }), "400:invalid_amount");
-  assert.equal(bad({ title: "t", amount: -5 }), "400:invalid_amount");
-  assert.equal(bad({ title: "  ", amount: 5 }), "400:invalid_title");
-  assert.equal(bad({ title: "x".repeat(101), amount: 5 }), "400:invalid_title");
-  assert.equal(bad({ title: 7, amount: 5 }), "400:invalid_title");
-  assert.equal(bad({ title: "t", amount: 5, role: "boss" }), "400:invalid_role");
-  assert.equal(bad({ title: "t", amount: 5, deadlineHours: 0 }), "400:invalid_deadline");
-  assert.equal(bad({ title: "t", amount: 5, deadlineHours: 721 }), "400:invalid_deadline");
-  assert.equal(bad({ title: "t", amount: 5, description: "d".repeat(501) }), "400:invalid_description");
+  assert.equal(bad({ title: "t", amount: 499 }), "400:invalid_amount");      // under NZ$5
+  assert.equal(bad({ title: "t", amount: 1.5 }), "400:invalid_amount");      // cents are integers
+  assert.equal(bad({ title: "t", amount: "5000" }), "400:invalid_amount");   // and never strings
+  assert.equal(bad({ title: "t", amount: 2000001 }), "400:invalid_amount");  // over NZ$20,000
+  assert.equal(bad({ title: "t", amount: -5000 }), "400:invalid_amount");
+  assert.equal(bad({ title: "  ", amount: 5000 }), "400:invalid_title");
+  assert.equal(bad({ title: "x".repeat(101), amount: 5000 }), "400:invalid_title");
+  assert.equal(bad({ title: 7, amount: 5000 }), "400:invalid_title");
+  assert.equal(bad({ title: "t", amount: 5000, role: "boss" }), "400:invalid_role");
+  assert.equal(bad({ title: "t", amount: 5000, deadlineHours: 0 }), "400:invalid_deadline");
+  assert.equal(bad({ title: "t", amount: 5000, deadlineHours: 721 }), "400:invalid_deadline");
+  assert.equal(bad({ title: "t", amount: 5000, description: "d".repeat(501) }), "400:invalid_description");
   assert.equal(code(() => store.registerAgent("")), "400:invalid_name");
   assert.equal(code(() => store.registerAgent({})), "400:invalid_name");
   assert.equal(code(() => store.registerAgent("n".repeat(51))), "400:invalid_name");
@@ -171,40 +292,48 @@ test("an agent can hold at most 20 unfinished deals; finished ones don't count",
   const ctx = setup();
   const a = ctx.agent("a");
   const ids = [];
-  for (let i = 0; i < 20; i++) ids.push(ctx.store.createDeal(a.rec, { title: "d" + i, amount: 1 }).id);
-  assert.equal(code(() => ctx.store.createDeal(a.rec, { title: "extra", amount: 1 })), "429:too_many_open_deals");
+  for (let i = 0; i < 20; i++) ids.push(ctx.store.createDeal(a.rec, { title: "d" + i, amount: 5000 }).id);
+  assert.equal(code(() => ctx.store.createDeal(a.rec, { title: "extra", amount: 5000 })), "429:too_many_open_deals");
   ctx.store.cancelDeal(a.rec, ids[0]);
-  assert.equal(ctx.store.createDeal(a.rec, { title: "now ok", amount: 1 }).state, "open");
+  assert.equal(ctx.store.createDeal(a.rec, { title: "now ok", amount: 5000 }).state, "open");
 });
 
-test("credits are conserved across many random deals", () => {
+test("across many random deals, no payment is ever attached to two deals", () => {
   const ctx = setup();
-  const agents = Array.from({ length: 6 }, (_, i) => ctx.agent("a" + i));
+  const agents = Array.from({ length: 6 }, (_, i) => ctx.ready(ctx.agent("a" + i)));
   let seed = 42;
   const rand = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
-  for (let i = 0; i < 300; i++) {
+  for (let i = 0; i < 200; i++) {
     const buyer = agents[rand(6)];
     const seller = agents[(agents.indexOf(buyer) + 1 + rand(5)) % 6];
     try {
-      const d = ctx.store.createDeal(buyer.rec, { title: "r" + i, amount: 1 + rand(60), deadlineHours: 1 });
+      const d = ctx.store.createDeal(buyer.rec, { title: "r" + i, amount: 500 + rand(60) * 100, deadlineHours: 1 });
       ctx.store.joinDeal(seller.rec, d.inviteCode);
-      ctx.store.fundDeal(buyer.rec, d.id);
+      const { deal, quote } = ctx.store.beginFunding(buyer.rec, d.id);
+      ctx.store.attachIntent(deal, { provider: "stripe", intentId: "pi_" + i, stripeAccountId: seller.rec.connect.stripeAccountId, quote });
+      ctx.store.markHeld(deal);
       const pick = rand(4);
-      if (pick === 0) ctx.store.releaseDeal(buyer.rec, d.id);
-      else if (pick === 1) ctx.store.refundDeal(seller.rec, d.id);
-      else if (pick === 2) { ctx.clock.t += 2 * 3600 * 1000; ctx.store.refundDeal(buyer.rec, d.id); }
-      // pick 3 leaves the deal funded
+      if (pick === 0) {
+        ctx.store.beginRelease(buyer.rec, d.id);
+        ctx.store.markReleased(deal, buyer.rec.id, { processorFee: 100, sellerNet: quote.amount - 100 });
+      } else if (pick === 1) {
+        ctx.store.beginRefund(seller.rec, d.id);
+        ctx.store.markRefunded(deal, seller.rec.id, {});
+      } else if (pick === 2) {
+        ctx.clock.t += 2 * 3600 * 1000;
+        ctx.store.beginRefund(buyer.rec, d.id);
+        ctx.store.markRefunded(deal, buyer.rec.id, {});
+      }
+      // pick 3 leaves the money held
     } catch (e) {
       assert.ok(e.status, "only ApiErrors are expected: " + e.message);
     }
-    assert.equal(ctx.store.audit().ok, true, `ledger unbalanced after round ${i}`);
-    for (const a of agents) assert.ok(a.rec.balance >= 0, "balance went negative");
+    const audit = ctx.store.audit();
+    assert.equal(audit.ok, true, `inconsistent after round ${i}: ${audit.problems.join("; ")}`);
   }
 });
 
-// ---------- people, sessions, deal types, test credits ----------
-
-const { parseTestCodes } = require("../src/store");
+// ---------- people, sessions, deal types ----------
 
 async function person(store, name = "alice", password = "correct horse") {
   const r = await store.registerHuman(name, password);
@@ -221,7 +350,7 @@ test("people can sign up, log in, and log out; passwords are never kept in plain
   const alice = await person(store, "Alice_1");
   assert.equal(alice.rec.kind, "human");
   assert.equal(alice.rec.name, "alice_1"); // usernames are lowercased
-  assert.equal(alice.rec.balance, 100);
+  assert.equal(alice.rec.balance, undefined); // people have no balance either
   assert.equal(JSON.stringify(alice.rec).includes(alice.password), false);
 
   const login = await store.loginHuman("ALICE_1", alice.password);
@@ -283,14 +412,14 @@ test("deal types: who can create and who can join", async () => {
   const bot2 = agent("bot2");
   const ann = await person(store, "ann");
   const bob = await person(store, "bob");
-  const create = (acct, type) => store.createDeal(acct.rec, { title: "t", amount: 5, type });
+  const create = (acct, type) => store.createDeal(acct.rec, { title: "t", amount: 5000, type });
 
   // creation rules
   assert.equal(code(() => create(ann, "ai-ai")), "403:wrong_account_type");
   assert.equal(code(() => create(bot1, "human-human")), "403:wrong_account_type");
   assert.equal(code(() => create(bot1, "nonsense")), "400:invalid_type");
-  assert.equal(store.createDeal(bot1.rec, { title: "t", amount: 5 }).type, "ai-ai"); // default for agents
-  assert.equal(store.createDeal(ann.rec, { title: "t", amount: 5 }).type, "human-human"); // default for people
+  assert.equal(store.createDeal(bot1.rec, { title: "t", amount: 5000 }).type, "ai-ai"); // default for agents
+  assert.equal(store.createDeal(ann.rec, { title: "t", amount: 5000 }).type, "human-human"); // default for people
 
   // AI to AI: only an agent may join
   const aa = create(bot1, "ai-ai");
@@ -323,49 +452,33 @@ test("a person and an AI agent can complete a full deal either way round", async
   const { store, agent } = setup();
   const bot = agent("bot");
   const ann = await person(store, "ann");
+  const ready = (rec, id) => {
+    store.setConnectAccount(rec, id);
+    store.updateConnectStatus(rec, { chargesEnabled: true, payoutsEnabled: true, detailsSubmitted: true });
+  };
+  ready(bot.rec, "acct_bot");
+  ready(ann.rec, "acct_ann");
 
-  // person pays the AI
-  let d = store.createDeal(ann.rec, { title: "write code", amount: 60, type: "ai-human", role: "buyer" });
-  store.joinDeal(bot.rec, d.inviteCode);
-  store.fundDeal(ann.rec, d.id);
-  store.releaseDeal(ann.rec, d.id);
-  assert.equal(ann.rec.balance, 40);
-  assert.equal(bot.rec.balance, 160); // fee floor(60 * 1%) = 0
+  const run = (payer, payee, amount, intentId) => {
+    const d = store.createDeal(payer, { title: "job", amount, type: "ai-human", role: "buyer" });
+    store.joinDeal(payee, d.inviteCode);
+    const { deal, quote } = store.beginFunding(payer, d.id);
+    store.attachIntent(deal, { provider: "stripe", intentId, stripeAccountId: payee.connect.stripeAccountId, quote });
+    store.markHeld(deal);
+    store.beginRelease(payer, d.id);
+    store.markReleased(deal, payer.id, { processorFee: 200, sellerNet: amount - 200 });
+    return store.getDeal(payer, d.id);
+  };
 
-  // AI pays the person
-  d = store.createDeal(bot.rec, { title: "photo", amount: 100, type: "ai-human", role: "buyer" });
-  store.joinDeal(ann.rec, d.inviteCode);
-  store.fundDeal(bot.rec, d.id);
-  store.releaseDeal(bot.rec, d.id);
-  assert.equal(bot.rec.balance, 60);
-  assert.equal(ann.rec.balance, 139); // 40 + 100 - fee 1
+  // the person pays the AI
+  let view = run(ann.rec, bot.rec, 6000, "pi_a");
+  assert.equal(view.state, "released");
+  assert.equal(view.payment.sellerNet, 5800);
+  assert.equal(view.quote.buyerTotal, 6060); // 1% on top, paid by the buyer
+
+  // and the AI pays the person
+  view = run(bot.rec, ann.rec, 10000, "pi_b");
+  assert.equal(view.state, "released");
+  assert.equal(view.payment.sellerNet, 9800);
   assert.equal(store.audit().ok, true);
-});
-
-test("test credits: disabled by default, secret code adds credits and keeps the ledger balanced", async () => {
-  const off = setup();
-  const offAgent = off.agent("a");
-  assert.equal(code(() => off.store.redeemCredits(offAgent.rec, "anything")), "404:redeem_disabled");
-
-  const clock = { t: Date.now() };
-  const store = createStore({ now: () => clock.t, testCodes: parseTestCodes("my-secret-code=500, another-code-1=25") });
-  const r = store.registerAgent("a");
-  const a = store.authenticate(r.apiKey);
-  assert.equal(code(() => store.redeemCredits(a, "wrong")), "400:invalid_code");
-  assert.equal(code(() => store.redeemCredits(a, "")), "400:invalid_code");
-  assert.equal(code(() => store.redeemCredits(a, undefined)), "400:invalid_code");
-  assert.deepEqual(store.redeemCredits(a, "my-secret-code"), { added: 500, balance: 600 });
-  assert.deepEqual(store.redeemCredits(a, "  another-code-1  "), { added: 25, balance: 625 });
-  assert.equal(store.audit().ok, true);
-  assert.equal(store.me(a).recentLedger[0].memo, "test credits (code redeemed)");
-  assert.equal(JSON.stringify(store.me(a)).includes("my-secret-code"), false);
-});
-
-test("parseTestCodes ignores short codes, bad amounts and junk", () => {
-  assert.deepEqual([...parseTestCodes("abcdefgh=10,short=5,validcode1=0,validcode2=-3,validcode3=1.5,novalue,=7, goodcode99 = 42 ")], [
-    ["abcdefgh", 10],
-    ["goodcode99", 42],
-  ]);
-  assert.equal(parseTestCodes(undefined).size, 0);
-  assert.equal(parseTestCodes("").size, 0);
 });

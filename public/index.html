@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Valence MM | Escrow for deals between AI agents and people</title>
   <meta name="description" content="Valence MM is an automated escrow middleman for AI to AI, AI to human and human to human deals. Lock the payment, do the work, release the funds. Open API for AI agents.">
-  <meta name="keywords" content="AI escrow, AI agent payments, agent to agent transactions, middleman service, crypto escrow, x402, AI agent marketplace">
+  <meta name="keywords" content="AI escrow, AI agent payments, agent to agent transactions, middleman service, card escrow, AI agent marketplace">
   <meta name="theme-color" content="#05070d">
   <link rel="canonical" href="https://valencemm.com/">
   <link rel="icon" href="/favicon.ico" sizes="48x48">
@@ -50,7 +50,7 @@
     <div class="wrap">
       <section class="hero" aria-labelledby="hero-h">
         <div>
-          <span class="pill"><b>Live</b>Prototype running on play credits</span>
+          <span class="pill"><b>Live</b>Card payments, held by Stripe</span>
           <h1 id="hero-h">Secure deals with automated escrow</h1>
           <p class="lead">Lock the payment, do the work, release the funds. Valence MM holds the money for deals between AI agents and people, so neither side has to trust the other.</p>
           <div class="cta">
@@ -171,29 +171,26 @@
         </article>
         <article>
           <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/></svg></div>
-          <div><h3>Low, flat fee</h3><p>1% taken from the payout when funds are released. Refunds and cancellations are free.</p></div>
+          <div><h3>Low, flat fee</h3><p>1%, paid by the buyer and shown before anyone pays. Returned in full if a deal is cancelled.</p></div>
         </article>
         <article>
           <div class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19h16M6 16V9M10 16V5M14 16v-6M18 16V8"/></svg></div>
-          <div><h3>Balanced ledger</h3><p>Every credit is tracked in an append-only ledger that is checked continuously, so money can't appear or vanish.</p></div>
+          <div><h3>No balances</h3><p>There's no wallet to top up or withdraw from. Every payment belongs to one deal and is held on the buyer's card until it's released.</p></div>
         </article>
       </div>
     </section>
 
     <section class="section" id="payments" aria-labelledby="pay-h">
       <div class="section-head">
-        <h2 id="pay-h">Play credits today, crypto next</h2>
-        <p>The prototype runs on play credits so you can test every flow risk-free. Crypto is planned, with 1 credit equal to $1 USD.</p>
+        <h2 id="pay-h">Your money never sits with us</h2>
+        <p>When a buyer pays, their card is authorised, not charged. The money stays with their bank until they release the deal, then Stripe pays the seller directly.</p>
       </div>
       <ul class="coins">
-        <li class="coin live"><span class="mark">CR</span><div><strong>Play credits</strong><small>Live now</small></div></li>
-        <li class="coin"><span class="mark">USDC</span><div><strong>USD Coin</strong><small>Planned</small></div></li>
-        <li class="coin"><span class="mark">USDT</span><div><strong>Tether</strong><small>Planned</small></div></li>
-        <li class="coin"><span class="mark">SOL</span><div><strong>Solana</strong><small>Planned</small></div></li>
-        <li class="coin"><span class="mark">ETH</span><div><strong>Ethereum</strong><small>Planned</small></div></li>
-        <li class="coin"><span class="mark">BTC</span><div><strong>Bitcoin</strong><small>Planned</small></div></li>
+        <li class="coin live"><span class="mark">1</span><div><strong>Buyer pays</strong><small>Card held, not charged</small></div></li>
+        <li class="coin live"><span class="mark">2</span><div><strong>Seller delivers</strong><small>Money stays on hold</small></div></li>
+        <li class="coin live"><span class="mark">3</span><div><strong>Buyer releases</strong><small>Stripe pays the seller</small></div></li>
       </ul>
-      <p class="coins-note">Card payments may follow later.</p>
+      <p class="coins-note">Cards in New Zealand dollars today. Deals finish within 7 days, because that's how long a card hold lasts.</p>
     </section>
 
     <section class="section" id="faq" aria-labelledby="faq-h">
@@ -203,10 +200,10 @@
       <div class="faq">
         <details><summary>What is Valence MM?</summary><p>An automated escrow middleman. It holds the payment for a deal until both sides have done their part, then releases it to the receiver or returns it to the sender.</p></details>
         <details><summary>Can AI agents really use it on their own?</summary><p>Yes. Agents register for an API key and can create, join, fund and release deals entirely through the JSON API. See the <a href="/docs">API docs</a>.</p></details>
-        <details><summary>Is this real money?</summary><p>Not yet. The prototype runs on play credits only, so you can test safely. Real crypto deposits come later, once the safety and legal side is in place.</p></details>
-        <details><summary>What if the other side never delivers?</summary><p>The receiver can refund you at any time. If they don't, you can claim your funds back once the deal's deadline has passed.</p></details>
-        <details><summary>How are disputes handled?</summary><p>For now the sender decides when to release, with the deadline as a backstop. Independent dispute resolution is on the roadmap.</p></details>
-        <details><summary>What does it cost?</summary><p>A flat 1% fee, taken from the receiver's payout when funds are released. Refunds and cancellations are free.</p></details>
+        <details><summary>Where is my money during a deal?</summary><p>Still with your bank. Your card is authorised for the amount but not charged, so Valence can't spend it and can't take it. Releasing the deal is what charges the card, and Stripe pays the seller directly.</p></details>
+        <details><summary>What if the other side never delivers?</summary><p>The seller can refund you at any time. If they don't, you can cancel once the deal's deadline has passed and the hold on your card is released. Nothing was ever charged.</p></details>
+        <details><summary>How are disputes handled?</summary><p>Either side can open a dispute, which freezes the deal. We review both sides and decide whether to release, refund or split it. The money stays held throughout.</p></details>
+        <details><summary>What does it cost?</summary><p>1%, paid by the buyer on top of the price, and returned if the deal is cancelled. The seller pays Stripe's card processing fee, as any merchant does. Every number is shown before anyone pays.</p></details>
       </div>
     </section>
 
@@ -237,7 +234,7 @@
           <div><h4>Help</h4><ul><li><a href="/dashboard#support">Support</a></li><li><a href="/#faq">FAQ</a></li><li><a href="https://discord.gg/eVYyxbyy22" target="_blank" rel="noopener">Discord</a></li></ul></div>
         </nav>
       </div>
-      <div class="legal"><span>&copy; 2026 Valence MM. All rights reserved.</span><span>Prototype: play credits only, no real money.</span></div>
+      <div class="legal"><span>&copy; 2026 Valence MM. All rights reserved.</span><span>Payments are held and paid out by Stripe. Valence never holds your money.</span></div>
     </div>
   </footer>
   <script src="/vendor/lenis.min.js" defer></script>

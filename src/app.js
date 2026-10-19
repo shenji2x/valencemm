@@ -1,7 +1,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { createStore, parseTestCodes } = require("./store");
+const { createStore } = require("./store");
 const { createApi } = require("./api");
 const { sendJson } = require("./http");
 const { createPersistence, backendFromEnv } = require("./persist");
@@ -9,6 +9,8 @@ const { discordFromEnv } = require("./discord");
 const { blobsFromEnv } = require("./files");
 const { readRaw } = require("./http");
 const { mailerFromEnv } = require("./email");
+const { stripeFromEnv } = require("./stripe");
+const { createPayments } = require("./payments");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const CONTENT_TYPES = {
@@ -61,7 +63,9 @@ const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "Strict-Transport-Security": "max-age=15552000",
   "Content-Security-Policy":
-    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data: blob:; manifest-src 'self'; " +
+    "default-src 'none'; script-src 'self' https://js.stripe.com; style-src 'self'; font-src 'self'; " +
+    "connect-src 'self' https://api.stripe.com; img-src 'self' data: blob:; manifest-src 'self'; " +
+    "frame-src https://js.stripe.com https://hooks.stripe.com; " +
     "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
 };
 
@@ -79,14 +83,15 @@ function sendError(res, err, isApi) {
 }
 
 function createApp(opts = {}) {
-  const testCodes = opts.testCodes || parseTestCodes(process.env.TEST_CREDIT_CODES);
-  const store = createStore({ now: opts.now, testCodes });
+  const store = createStore({ now: opts.now });
   const persistence = createPersistence(store, opts.backend || backendFromEnv(), { onFatal: opts.onFatal });
   const discord = opts.discord || discordFromEnv();
   const mailer = opts.mailer || mailerFromEnv();
   const blobs = opts.blobs || blobsFromEnv();
+  const stripe = opts.stripe || stripeFromEnv();
+  const payments = opts.payments || createPayments({ store, stripe, persistence, siteUrl: opts.siteUrl || `https://${CANONICAL_HOST}` });
   const apiParts = {};
-  const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, exports: apiParts });
+  const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, stripe, payments, exports: apiParts });
   const statics = loadStatic();
 
   async function handle(req, res) {
@@ -151,14 +156,14 @@ function createApp(opts = {}) {
       return sendJson(res, 200, {
         service: "Valence",
         status: "online",
-        mode: "play-credits",
-        testCredits: testCodes.size > 0,
+        payments: stripe.configured ? "stripe (cards, funds held at the provider)" : "off",
+        webhooks: stripe.acceptsWebhooks ? "on" : "off",
         storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
         email: mailer.enabled ? "on" : "off",
         support: discord.mode === "bot" ? "discord (two-way)" : discord.mode === "webhook" ? "discord (notifications only)" : "website only",
         slashCommands: discord.hasInteractions ? "on" : "off",
         attachments: blobs.kind === "memory" ? "memory (not saved)" : "saved",
-        ledger: store.audit().ok ? "balanced" : "UNBALANCED",
+        deals: store.audit().ok ? "consistent" : "NEEDS ATTENTION",
       });
     }
 
@@ -181,14 +186,24 @@ function createApp(opts = {}) {
   server.discord = discord;
   server.mailer = mailer;
   server.blobs = blobs;
+  server.stripe = stripe;
+  server.payments = payments;
   server.support = apiParts.support;
   // Tell Discord which slash commands exist. Never blocks startup.
   server.commandsRegistered = discord.mode === "bot" && !opts.skipCommandRegistration
     ? discord.registerCommands().then(() => true).catch((err) => { console.error("Could not register Discord commands:", err.message); return false; })
     : Promise.resolve(false);
   // Load the saved snapshot before taking traffic. server.js waits for this.
-  server.ready = persistence.load();
-  server.testCodesEnabled = testCodes.size > 0;
+  // Load the snapshot, then start the auto-release and hold-expiry sweeps.
+  server.ready = persistence.load().then((r) => {
+    if (!opts.skipTimers) payments.startTimers();
+    return r;
+  });
+  const close = server.close.bind(server);
+  server.close = (cb) => {
+    payments.stopTimers();
+    return close(cb);
+  };
   return server;
 }
 

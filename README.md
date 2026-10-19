@@ -4,29 +4,38 @@ Middleman (escrow) service for deals between AI agents and people: AI to AI, AI 
 
 Live at https://valencemm.com
 
-**Prototype status:** deals run on play credits only (no real money). Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
+**Payments:** cards in New Zealand dollars through Stripe Connect. Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
 
 ## Run it locally
 
 ```
 npm start        # http://localhost:8080
-npm test         # store tests + end-to-end HTTP tests
-npm run demo     # with the server running: plays out one full AI to AI deal and prints each step
+npm test         # store, payment and end-to-end HTTP tests (Stripe is faked locally)
 ```
 
-### Test credits (stand-in for depositing money)
+## Card payments (Stripe)
 
-Set `TEST_CREDIT_CODES` before starting the server. Format is `code=credits`, comma separated, codes at least 8 characters. Then type a code into "Add test credits" on the dashboard.
+How the money moves, and why each piece is there:
 
-```
-# Mac / Linux / Git Bash
-TEST_CREDIT_CODES="my-secret-code=500" npm start
+| Choice | What it does |
+| --- | --- |
+| **Standard connected accounts** | Each seller has their own Stripe account. Stripe verifies them, Stripe bills them for their own fees, and Stripe is responsible for any balance on their account going negative. |
+| **Direct charges** | The charge is created on the seller's account, so they are the merchant of record. A chargeback is debited from the seller's Stripe balance, not Valence's. |
+| **Manual capture** | Funding a deal authorises the buyer's card without charging it. Release captures; refund cancels the hold. A hold that was never captured can't be charged back. |
+| **`application_fee_amount`** | Valence's 1% (minimum NZ$0.50), paid by the buyer, is routed to Valence by Stripe at capture. |
+| **3D Secure on every payment** | An authenticated card shifts fraud liability to the card issuer. |
 
-# Windows PowerShell
-$env:TEST_CREDIT_CODES="my-secret-code=500"; npm start
-```
+A card hold lasts about 7 days, so deals have to finish inside that. The server clamps each deal's deadline to the hold, auto-releases a delivered deal after 72 hours of silence from the buyer, and cancels any hold that's about to expire rather than letting it lapse quietly. Those sweeps run every 15 minutes.
 
-Never commit a real code to this repo (it is public). On Cloud Run, set it as an environment variable on the service instead. With no variable set, the feature is off.
+Set these on the Cloud Run service (never in this repo, it is public). With no key set, payments are off and the money routes say so.
+
+| Setting | What it is |
+| --- | --- |
+| `STRIPE_SECRET_KEY` | Your platform's secret key (`sk_live_...`, or `sk_test_...` while testing). |
+| `STRIPE_PUBLISHABLE_KEY` | The matching publishable key (`pk_...`). The browser uses it to show Stripe's card form. |
+| `STRIPE_WEBHOOK_SECRET` | The signing secret (`whsec_...`) for a **Connect** webhook endpoint at `https://valencemm.com/v1/webhooks/stripe` listening to `payment_intent.*`, `charge.dispute.created`, `charge.dispute.closed` and `account.updated`. |
+
+Card details are entered into Stripe's own iframe and never reach this server. The CSP allows `js.stripe.com` for that and nothing else from outside.
 
 ## Saving data
 
@@ -69,7 +78,10 @@ Attachments are images only (PNG, JPEG, GIF, WebP), checked by their actual file
 ## Layout
 
 - `server.js`: starts the server
-- `src/store.js`: accounts, sessions, deals, escrow and the credit ledger
+- `src/store.js`: accounts, sessions, deals and their payment records (there are no balances)
+- `src/money.js`: amounts in cents, the fee rules and quotes
+- `src/stripe.js`: the Stripe Connect client and webhook signature checks
+- `src/payments.js`: funding, release, refunds, auto-release and the hold-expiry sweep
 - `src/persist.js`: saving and loading snapshots (Cloud Storage, local file or memory)
 - `src/discord.js`: relays support tickets to Discord (bot or webhook)
 - `src/security.js`: authenticator codes (RFC 6238), email and recovery codes
@@ -80,9 +92,8 @@ Attachments are images only (PNG, JPEG, GIF, WebP), checked by their actual file
 - `src/api.js`: the `/v1` routes, rate limits and idempotency keys
 - `src/http.js`: small HTTP helpers (JSON body reading, rate limiter)
 - `src/app.js`: ties it together, serves the pages and security headers
-- `public/`: the website (home, log in, sign up, docs, and the dashboard app: overview, stats, new deal, join, active and past deals, support, FAQ, settings)
-- `public/vendor/`: GSAP 3.15 (+ ScrollTrigger) and Lenis 1.3.27, served from our own origin because the CSP only allows our own scripts
+- `public/`: the website (home, log in, sign up, docs, and the dashboard app: overview, stats, new deal, join, active and past deals, payments, support, FAQ, settings)
+- `public/vendor/`: GSAP 3.15 (+ ScrollTrigger) and Lenis 1.3.27, served from our own origin (the only outside script allowed is Stripe.js)
 - `public/fonts/`: Roboto (Apache 2.0) and JetBrains Mono (SIL OFL), subset to Latin
 - `public/vendor/qrcode.js`: QR code generator (MIT) for the authenticator setup screen
-- `test/`: tests
-- `scripts/demo.js`: demo deal runner
+- `test/`: tests, including `fakestripe.js`, a local stand-in for Stripe

@@ -4,8 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test",
-    "demo": "node scripts/demo.js"
+    "test": "node --test"
   },
   "dependencies": {}
 }

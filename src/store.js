@@ -6,24 +6,24 @@ const crypto = require("crypto");
 const { promisify } = require("util");
 const { ApiError } = require("./errors");
 const sec = require("./security");
+const money = require("./money");
 
 const scrypt = promisify(crypto.scrypt);
 
-const STARTING_CREDITS = 100; // welcome grant of play credits; set to 0 to require a test code instead
-const FEE_BPS = 100; // 1% platform fee, charged to the receiver's payout on release
-const MAX_AMOUNT = 10000;
+const FEE_BPS = money.PLATFORM_BPS; // 1% commission, routed to Valence by Stripe at capture
+const MIN_AMOUNT = money.MIN_AMOUNT;
+const MAX_AMOUNT = money.MAX_AMOUNT;
 const MAX_ACCOUNTS = 5000;
 const MAX_DEALS = 20000;
 const MAX_OPEN_DEALS_PER_ACCOUNT = 20;
-const MAX_LEDGER_ENTRIES = 200000;
+const MAX_EVENTS = 200000;
 const MAX_SESSIONS = 20000;
-const MAX_REDEEMED_PER_ACCOUNT = 100000;
 const SESSION_MS = 7 * 24 * 3600 * 1000;
 const HOUR_MS = 3600 * 1000;
 const DEAL_TYPES = ["ai-ai", "ai-human", "human-human"];
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
-const OPEN_STATES = new Set(["open", "joined", "funded"]);
-const SNAPSHOT_SCHEMA = 1;
+const OPEN_STATES = new Set(["open", "joined", "awaiting_setup", "funding", "funded", "delivered", "disputed"]);
+const SNAPSHOT_SCHEMA = 2;
 const TICKET_CATEGORIES = ["deal", "account", "payments", "bug", "other"];
 const MAX_TICKETS = 20000;
 const MAX_OPEN_TICKETS_PER_ACCOUNT = 5;
@@ -57,45 +57,45 @@ function cleanText(value, field, { min = 1, max }) {
   return v;
 }
 
-// TEST_CREDIT_CODES="secretcode1=500,anothercode=100" -> Map(code -> credits).
-// Codes must be at least 8 characters. Unset or empty disables test credits entirely.
-function parseTestCodes(text) {
-  const codes = new Map();
-  for (const part of String(text || "").split(",")) {
-    const i = part.lastIndexOf("=");
-    if (i < 1) continue;
-    const code = part.slice(0, i).trim();
-    const amount = Number(part.slice(i + 1).trim());
-    if (code.length >= 8 && Number.isInteger(amount) && amount >= 1 && amount <= MAX_REDEEMED_PER_ACCOUNT) codes.set(code, amount);
-  }
-  return codes;
+// Schema 1 was the play-credit prototype. Its accounts, sign-ins, two-factor settings, Discord
+// links and support tickets carry over. Its balances, credit ledger and deals do not: they were
+// denominated in play credits, and showing "100 credits" as NZ$1.00 would be worse than useless.
+function migrate(state) {
+  if (!state || state.schema !== 1) return state;
+  return {
+    schema: 2,
+    savedAt: state.savedAt,
+    accounts: (state.accounts || []).map(({ balance, redeemed, ...rest }) => ({ ...rest, connect: rest.connect || null })),
+    sessions: state.sessions || [],
+    deals: [],
+    events: [],
+    tickets: state.tickets || [],
+    ticketSeq: state.ticketSeq || 0,
+    migratedFrom: { schema: 1, droppedDeals: (state.deals || []).length, droppedLedgerEntries: (state.ledger || []).length },
+  };
 }
 
-function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
+function createStore({ now = () => Date.now() } = {}) {
   const accounts = new Map(); // accountId -> account
   const byKeyHash = new Map(); // sha256(apiKey) -> account (AI agents)
   const byUsername = new Map(); // lowercase username -> account (people)
   const sessions = new Map(); // sha256(sessionToken) -> { accountId, expiresAt }
   const deals = new Map(); // dealId -> deal
   const dealsByInvite = new Map(); // inviteCode -> dealId
-  const ledger = []; // append-only
+  const events = []; // append-only record of what happened to money held at the provider
   const tickets = new Map(); // ticketId -> support ticket
   const discordLinks = new Map(); // link code -> { accountId, expiresAt } (short-lived, memory only)
   let ticketSeq = 0; // human-friendly ticket numbers (#1, #2, ...)
-  const platform = { balance: 0 };
-  let minted = 0; // every credit ever created (welcome grants + test codes)
   const dummySalt = crypto.randomBytes(16); // used to keep login timing similar for unknown usernames
   const challenges = new Map(); // sha256(challenge token) -> pending two-factor sign-in (memory only, 10 minutes)
 
-  function record(account, delta, dealId, memo) {
-    ledger.push({ id: ledger.length + 1, at: now(), account, delta, dealId: dealId || null, memo });
-    if (ledger.length > MAX_LEDGER_ENTRIES) ledger.splice(0, ledger.length - MAX_LEDGER_ENTRIES);
-  }
-
-  function mint(account, amount, memo) {
-    account.balance += amount;
-    minted += amount;
-    record(account.id, amount, null, memo);
+  // Append-only. An event records something that happened to money held at Stripe; it is never
+  // a balance, is never updated, and is never deleted. This is the history page and the audit log.
+  function logEvent(accountId, dealId, event, extra = {}) {
+    const row = { id: events.length + 1, at: now(), account: accountId || null, dealId: dealId || null, event, ...extra };
+    events.push(row);
+    if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+    return row;
   }
 
   function newSession(account) {
@@ -105,8 +105,19 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     return token;
   }
 
+  // Which rails this account can be paid on. Never an amount: there is no balance to report.
+  function payoutsView(a) {
+    const c = a.connect || null;
+    return {
+      provider: c && c.stripeAccountId ? "stripe" : null,
+      started: Boolean(c && c.stripeAccountId),
+      detailsSubmitted: Boolean(c && c.detailsSubmitted),
+      ready: Boolean(c && c.payoutsEnabled && c.chargesEnabled),
+    };
+  }
+
   function publicAccount(a) {
-    const out = { accountId: a.id, kind: a.kind, name: a.name, balance: a.balance, currency: "play-credits" };
+    const out = { accountId: a.id, kind: a.kind, name: a.name, currency: money.DEFAULT_CURRENCY, payouts: payoutsView(a) };
     if (a.username) out.username = a.username;
     return out;
   }
@@ -137,7 +148,24 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       title: deal.title,
       description: deal.description,
       amount: deal.amount,
+      currency: deal.currency || money.DEFAULT_CURRENCY,
       feeBps: FEE_BPS,
+      rail: deal.rail || "card",
+      quote: money.quoteRange(deal.amount, { code: deal.currency || money.DEFAULT_CURRENCY }),
+      payment: paymentView(deal),
+      // Both sides see that a deal is frozen and why. Staff notes are not part of this.
+      dispute: deal.dispute
+        ? {
+          kind: deal.dispute.kind,
+          state: deal.dispute.state,
+          reason: deal.dispute.reason || null,
+          openedBy: deal.dispute.openedBy || null,
+          openedAt: deal.dispute.openedAt ? new Date(deal.dispute.openedAt).toISOString() : null,
+          outcome: deal.dispute.outcome || null,
+        }
+        : null,
+      deliveredAt: deal.deliveredAt ? new Date(deal.deliveredAt).toISOString() : null,
+      deliveryNote: deal.deliveryNote || null,
       deadlineHours: deal.deadlineHours,
       state: deal.state,
       yourRole: role,
@@ -154,6 +182,28 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     // Only the creator sees the invite code, and only until someone joins.
     if (deal.state === "open" && deal.creatorId === viewerId) out.inviteCode = deal.inviteCode;
     return out;
+  }
+
+  // What either side may know about the money. Never a card number, never a client secret.
+  function paymentView(deal) {
+    const p = deal.payment;
+    if (!p) return null;
+    return {
+      status: p.status,
+      provider: p.provider,
+      amount: p.amount,
+      currency: p.currency,
+      platformFee: p.platformFee,
+      processorFee: p.processorFee == null ? null : p.processorFee,
+      sellerNet: p.sellerNet == null ? null : p.sellerNet,
+      brand: p.brand || null,
+      last4: p.last4 || null,
+      authorizedAt: p.authorizedAt ? new Date(p.authorizedAt).toISOString() : null,
+      capturedAt: p.capturedAt ? new Date(p.capturedAt).toISOString() : null,
+      canceledAt: p.canceledAt ? new Date(p.canceledAt).toISOString() : null,
+      holdExpiresAt: p.authorizedAt ? new Date(money.holdExpiry(p.authorizedAt)).toISOString() : null,
+      holdAtRisk: p.authorizedAt && p.status === "held" ? money.holdAtRisk(p.authorizedAt, now()) : false,
+    };
   }
 
   function mustGetDeal(account, dealId) {
@@ -274,6 +324,19 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     return { c, a, key };
   }
 
+  function eventsFor(accountId, limit) {
+    return events.filter((e) => e.account === accountId).slice(-limit).reverse().map((e) => ({
+      at: new Date(e.at).toISOString(),
+      event: e.event,
+      dealId: e.dealId,
+      amount: e.amount == null ? null : e.amount,
+      currency: e.currency || null,
+      direction: e.direction || null,
+      ref: e.ref || null,
+      detail: e.detail || null,
+    }));
+  }
+
   function checkCapacity() {
     if (accounts.size >= MAX_ACCOUNTS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
   }
@@ -283,11 +346,10 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       const name = cleanText(rawName, "name", { max: 50 });
       checkCapacity();
       const apiKey = "vlc_" + crypto.randomBytes(24).toString("hex");
-      const agent = { id: randomId("agent"), kind: "agent", name, createdAt: now(), balance: 0, redeemed: 0, keyHash: sha256(apiKey) };
+      const agent = { id: randomId("agent"), kind: "agent", name, createdAt: now(), connect: null, keyHash: sha256(apiKey) };
       accounts.set(agent.id, agent);
       byKeyHash.set(agent.keyHash, agent);
-      mint(agent, STARTING_CREDITS, "play-credit welcome grant");
-      return { agentId: agent.id, accountId: agent.id, kind: "agent", name: agent.name, apiKey, balance: agent.balance };
+      return { agentId: agent.id, accountId: agent.id, kind: "agent", name: agent.name, apiKey };
     },
 
     async registerHuman(rawUsername, password) {
@@ -305,10 +367,9 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       // re-check after the await: another signup may have claimed the name meanwhile
       if (byUsername.has(username)) throw new ApiError(409, "username_taken", "That username is taken");
       checkCapacity();
-      const person = { id: randomId("user"), kind: "human", name: username, username, createdAt: now(), balance: 0, redeemed: 0, salt, hash };
+      const person = { id: randomId("user"), kind: "human", name: username, username, createdAt: now(), connect: null, salt, hash };
       accounts.set(person.id, person);
       byUsername.set(username, person);
-      mint(person, STARTING_CREDITS, "play-credit welcome grant");
       return { token: newSession(person), account: publicAccount(person) };
     },
 
@@ -491,37 +552,94 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     },
 
     me(account) {
-      const recent = ledger.filter((e) => e.account === account.id).slice(-20).reverse();
       return {
         ...publicAccount(account),
         ...(account.kind === "human" ? { security: securityView(account) } : {}),
-        recentLedger: recent.map((e) => ({ at: new Date(e.at).toISOString(), delta: e.delta, dealId: e.dealId, memo: e.memo })),
+        recentPayments: eventsFor(account.id, 20),
       };
     },
 
-    // Test-only stand-in for depositing money: a secret code from the server's environment adds credits.
-    redeemCredits(account, rawCode) {
-      if (testCodes.size === 0) throw new ApiError(404, "redeem_disabled", "Test credits are not turned on for this server");
-      const given = sha256Buf(typeof rawCode === "string" ? rawCode.trim() : "");
-      let amount = null;
-      for (const [code, credits] of testCodes) {
-        if (crypto.timingSafeEqual(given, sha256Buf(code)) && amount === null) amount = credits;
+    // Past tense only: what has moved, never what is "available".
+    payments(account, { limit = 200 } = {}) {
+      return { currency: money.DEFAULT_CURRENCY, events: eventsFor(account.id, limit) };
+    },
+
+    // ---- the seller's payout account at Stripe ----
+
+    // We store the id and the two flags Stripe gives us. Nothing else: no bank details, no
+    // documents, no identity data. Those live at Stripe, which is the point.
+    setConnectAccount(account, stripeAccountId) {
+      account.connect = { ...(account.connect || {}), stripeAccountId, startedAt: now(), chargesEnabled: false, payoutsEnabled: false, detailsSubmitted: false };
+      logEvent(account.id, null, "payouts_started", { ref: stripeAccountId });
+      return payoutsView(account);
+    },
+
+    updateConnectStatus(account, { chargesEnabled, payoutsEnabled, detailsSubmitted }) {
+      if (!account.connect) return payoutsView(account);
+      const was = payoutsView(account).ready;
+      Object.assign(account.connect, {
+        chargesEnabled: Boolean(chargesEnabled),
+        payoutsEnabled: Boolean(payoutsEnabled),
+        detailsSubmitted: Boolean(detailsSubmitted),
+        checkedAt: now(),
+      });
+      const isNow = payoutsView(account).ready;
+      if (isNow && !was) {
+        logEvent(account.id, null, "payouts_ready", { ref: account.connect.stripeAccountId });
+        // Deals that were waiting on this seller can be paid now.
+        for (const d of deals.values()) {
+          if (d.sellerId === account.id && d.state === "awaiting_setup") setState(d, "joined", null);
+        }
       }
-      if (amount === null) throw new ApiError(400, "invalid_code", "That code isn't valid");
-      if (account.redeemed + amount > MAX_REDEEMED_PER_ACCOUNT) {
-        throw new ApiError(409, "redeem_limit", "This account has reached the test credit limit");
-      }
-      account.redeemed += amount;
-      mint(account, amount, "test credits (code redeemed)");
-      return { added: amount, balance: account.balance };
+      return payoutsView(account);
+    },
+
+    accountByStripeId(stripeAccountId) {
+      for (const a of accounts.values()) if (a.connect && a.connect.stripeAccountId === stripeAccountId) return a;
+      return null;
+    },
+
+    payoutsStatus(account) {
+      return payoutsView(account);
+    },
+
+    // Deals whose seller needs to finish onboarding, so we can nudge them.
+    dealsAwaitingSetup(accountId) {
+      return [...deals.values()].filter((d) => d.sellerId === accountId && d.state === "awaiting_setup").map((d) => view(d, accountId));
+    },
+
+    // ---- timers: auto-release and expiring holds ----
+
+    // A delivered deal the buyer hasn't objected to, past the inspection window.
+    dealsDueForAutoRelease(windowMs) {
+      return [...deals.values()].filter((d) =>
+        d.state === "delivered" && d.deliveredAt && now() - d.deliveredAt >= windowMs &&
+        d.payment && d.payment.status === "held");
+    },
+
+    // Holds that are about to expire on their own. These must be captured or cancelled, not left.
+    dealsWithExpiringHolds() {
+      return [...deals.values()].filter((d) =>
+        d.payment && d.payment.status === "held" && money.holdAtRisk(d.payment.authorizedAt, now()));
+    },
+
+    dealById(dealId) {
+      return deals.get(dealId) || null;
+    },
+
+    dealByIntent(intentId) {
+      for (const d of deals.values()) if (d.payment && d.payment.intentId === intentId) return d;
+      return null;
     },
 
     createDeal(account, input) {
       const title = cleanText(input.title, "title", { max: 100 });
       const description = input.description == null ? "" : cleanText(input.description, "description", { min: 0, max: 500 });
+      // Amounts are integer cents. The client never sends a price we then trust for a charge:
+      // this is the agreed deal value, and every fee is computed from it on the server.
       const amount = input.amount;
-      if (!Number.isInteger(amount) || amount < 1 || amount > MAX_AMOUNT) {
-        throw new ApiError(400, "invalid_amount", `amount must be a whole number of credits from 1 to ${MAX_AMOUNT}`);
+      if (!Number.isInteger(amount) || amount < MIN_AMOUNT || amount > MAX_AMOUNT) {
+        throw new ApiError(400, "invalid_amount", `amount must be a whole number of cents from ${MIN_AMOUNT} to ${MAX_AMOUNT}`);
       }
       const role = input.role == null ? "buyer" : input.role;
       if (role !== "buyer" && role !== "seller") throw new ApiError(400, "invalid_role", 'role must be "buyer" or "seller"');
@@ -546,6 +664,7 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       do code = newInviteCode(); while (dealsByInvite.has(code));
       const deal = {
         id: randomId("deal"), type, joinKind, title, description, amount, deadlineHours,
+        currency: money.DEFAULT_CURRENCY, rail: "card", payment: null, dispute: null,
         state: "open", creatorId: account.id,
         buyerId: role === "buyer" ? account.id : null,
         sellerId: role === "seller" ? account.id : null,
@@ -587,51 +706,157 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
         .map((d) => view(d, account.id));
     },
 
-    fundDeal(account, dealId) {
-      const deal = mustGetDeal(account, dealId);
-      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer (sender) can fund the deal");
-      if (deal.state !== "joined") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be "joined" to fund`);
-      if (account.balance < deal.amount) throw new ApiError(402, "insufficient_credits", "Not enough play credits");
-      account.balance -= deal.amount;
-      record(account.id, -deal.amount, deal.id, "deposit into escrow");
-      record("escrow:" + deal.id, deal.amount, deal.id, "escrow funded");
-      deal.fundedAt = now();
-      deal.deadlineAt = deal.fundedAt + deal.deadlineHours * HOUR_MS;
-      setState(deal, "funded", account.id);
-      return view(deal, account.id);
-    },
+    // ---- funding ----
+    //
+    // The store never moves money; it cannot, because it holds none. These methods check that a
+    // step is allowed and record that the provider did it. src/payments.js talks to Stripe.
 
-    releaseDeal(account, dealId) {
+    // Checks everything that must be true before we ask the buyer for a card, and prices the deal.
+    beginFunding(account, dealId) {
       const deal = mustGetDeal(account, dealId);
-      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer (sender) can release the funds");
-      if (deal.state !== "funded") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be "funded" to release`);
-      const seller = accounts.get(deal.sellerId);
-      const fee = Math.floor((deal.amount * FEE_BPS) / 10000);
-      const payout = deal.amount - fee;
-      record("escrow:" + deal.id, -deal.amount, deal.id, "escrow released");
-      seller.balance += payout;
-      record(seller.id, payout, deal.id, "deal payout");
-      if (fee > 0) {
-        platform.balance += fee;
-        record("platform", fee, deal.id, "platform fee");
+      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can fund the deal");
+      if (deal.state === "funded") throw new ApiError(409, "already_funded", "This deal is already funded");
+      if (deal.state !== "joined" && deal.state !== "awaiting_setup" && deal.state !== "funding") {
+        throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be joined to fund`);
       }
-      setState(deal, "released", account.id);
+      const seller = accounts.get(deal.sellerId);
+      if (!seller) throw new ApiError(409, "no_seller", "Nobody has joined this deal yet");
+      // Paying into a deal whose seller cannot be paid out is how buyers lose money. Refuse early.
+      if (!payoutsView(seller).ready) {
+        setState(deal, "awaiting_setup", account.id);
+        throw new ApiError(409, "seller_not_ready", `${seller.name} hasn't finished setting up payouts yet, so this deal can't be funded. They've been asked to.`);
+      }
+      if (deal.state !== "funding") setState(deal, "funding", account.id);
+      return {
+        deal,
+        seller,
+        quote: money.quote(deal.amount, { code: deal.currency || money.DEFAULT_CURRENCY }),
+      };
+    },
+
+    // Remember the intent we created, before the buyer has entered a card.
+    attachIntent(deal, { provider, intentId, stripeAccountId, quote }) {
+      deal.payment = {
+        id: randomId("pay"), provider, intentId, stripeAccountId,
+        status: "pending",
+        amount: quote.buyerTotal, currency: quote.currency,
+        dealAmount: quote.amount, platformFee: quote.platformFee,
+        processorFee: null, sellerNet: null,
+        createdAt: now(), authorizedAt: null, capturedAt: null, canceledAt: null,
+      };
+      logEvent(deal.buyerId, deal.id, "payment_started", { amount: quote.buyerTotal, currency: quote.currency, ref: intentId });
+      return deal.payment;
+    },
+
+    // The card was authorised. Money is held on it; nothing has been captured.
+    markHeld(deal, { brand, last4, authorizedAt } = {}) {
+      const p = deal.payment;
+      if (!p) throw new ApiError(409, "no_payment", "This deal has no payment");
+      if (p.status === "held" || p.status === "captured") return deal; // webhooks arrive more than once
+      p.status = "held";
+      p.authorizedAt = authorizedAt || now();
+      p.brand = brand || null;
+      p.last4 = last4 || null;
+      deal.fundedAt = p.authorizedAt;
+      // The hold expires; the deal's own deadline can never outlive it.
+      const wanted = p.authorizedAt + deal.deadlineHours * HOUR_MS;
+      deal.deadlineAt = Math.min(wanted, money.holdExpiry(p.authorizedAt));
+      setState(deal, "funded", deal.buyerId);
+      logEvent(deal.buyerId, deal.id, "funds_held", { amount: p.amount, currency: p.currency, ref: p.intentId, direction: "in" });
+      return deal;
+    },
+
+    markHeldFailed(deal, reason) {
+      if (deal.payment) deal.payment.status = "failed";
+      if (deal.state === "funding") setState(deal, "joined", deal.buyerId);
+      logEvent(deal.buyerId, deal.id, "payment_failed", { detail: reason || null });
+      return deal;
+    },
+
+    // The seller says the work is done. Starts the clock on auto-release.
+    markDelivered(account, dealId, note) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.sellerId !== account.id) throw new ApiError(403, "not_seller", "Only the seller can mark a deal delivered");
+      if (deal.state !== "funded") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded`);
+      deal.deliveredAt = now();
+      deal.deliveryNote = note == null || note === "" ? null : cleanText(note, "note", { min: 0, max: 500 });
+      setState(deal, "delivered", account.id);
+      logEvent(deal.sellerId, deal.id, "delivered", {});
       return view(deal, account.id);
     },
 
-    refundDeal(account, dealId) {
+    // Who may release, and is it safe to. Does not touch money.
+    beginRelease(account, dealId, { byTimer = false } = {}) {
       const deal = mustGetDeal(account, dealId);
-      if (deal.state !== "funded") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be "funded" to refund`);
+      if (!byTimer && deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can release the funds");
+      if (deal.state !== "funded" && deal.state !== "delivered") {
+        throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded to release`);
+      }
+      const p = deal.payment;
+      if (!p || p.status !== "held") throw new ApiError(409, "no_hold", "There is no held payment on this deal");
+      return { deal, payment: p, seller: accounts.get(deal.sellerId) };
+    },
+
+    // Stripe captured the hold: the seller has been paid, and Valence's fee was taken with it.
+    markReleased(deal, byId, { processorFee = null, sellerNet = null, capturedAt } = {}) {
+      const p = deal.payment;
+      if (p.status === "captured") return deal;
+      p.status = "captured";
+      p.capturedAt = capturedAt || now();
+      p.processorFee = processorFee;
+      p.sellerNet = sellerNet == null ? null : sellerNet;
+      setState(deal, "released", byId);
+      logEvent(deal.sellerId, deal.id, "paid_out", { amount: sellerNet == null ? p.dealAmount : sellerNet, currency: p.currency, ref: p.intentId, direction: "in" });
+      logEvent(deal.buyerId, deal.id, "released", { amount: p.amount, currency: p.currency, ref: p.intentId, direction: "out" });
+      return deal;
+    },
+
+    // Who may cancel the hold, and is the deal in a state where that is allowed.
+    beginRefund(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.state !== "funded" && deal.state !== "delivered") {
+        throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded to refund`);
+      }
       const isSeller = deal.sellerId === account.id;
       if (!isSeller && now() < deal.deadlineAt) {
         throw new ApiError(403, "deadline_not_reached", "The buyer can only claim a refund after the deadline; the seller can refund any time");
       }
-      const buyer = accounts.get(deal.buyerId);
-      record("escrow:" + deal.id, -deal.amount, deal.id, "escrow refunded");
-      buyer.balance += deal.amount;
-      record(buyer.id, deal.amount, deal.id, "deal refund");
-      setState(deal, "refunded", account.id);
+      const p = deal.payment;
+      if (!p || (p.status !== "held" && p.status !== "captured")) throw new ApiError(409, "no_hold", "There is nothing to refund on this deal");
+      return { deal, payment: p, captured: p.status === "captured" };
+    },
+
+    // The hold was cancelled (or, rarely, a captured payment was refunded).
+    markRefunded(deal, byId, { reason = null, refunded = false } = {}) {
+      const p = deal.payment;
+      if (p.status === "canceled" || p.status === "refunded") return deal;
+      p.status = refunded ? "refunded" : "canceled";
+      p.canceledAt = now();
+      p.cancelReason = reason;
+      setState(deal, "refunded", byId);
+      logEvent(deal.buyerId, deal.id, refunded ? "refunded" : "hold_released", { amount: p.amount, currency: p.currency, ref: p.intentId, direction: "in", detail: reason });
+      return deal;
+    },
+
+    // Either side can freeze a deal. The money is already frozen, so this costs nothing.
+    openDispute(account, dealId, rawReason) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.state !== "funded" && deal.state !== "delivered") {
+        throw new ApiError(409, "bad_state", "Only a funded deal can be disputed");
+      }
+      const reason = cleanText(rawReason, "reason", { min: 10, max: 1000 });
+      deal.dispute = { openedBy: account.id, openedAt: now(), reason, kind: "internal", state: "open", outcome: null };
+      setState(deal, "disputed", account.id);
+      logEvent(account.id, deal.id, "dispute_opened", { detail: reason.slice(0, 200) });
       return view(deal, account.id);
+    },
+
+    // A chargeback: the buyer's bank went around us. Recorded for the owner, not actionable here.
+    recordChargeback(deal, detail) {
+      deal.dispute = { ...(deal.dispute || {}), kind: "chargeback", state: "open", openedAt: now(), detail: detail || null };
+      if (deal.state === "funded" || deal.state === "delivered") setState(deal, "disputed", null);
+      logEvent(deal.sellerId, deal.id, "chargeback", { detail: detail || null, ref: deal.payment && deal.payment.intentId });
+      return deal;
     },
 
     cancelDeal(account, dealId) {
@@ -691,8 +916,8 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
     // ---- stats for the dashboard ----
     stats(account, { days = 30 } = {}) {
       const mine = [...deals.values()].filter((d) => d.buyerId === account.id || d.sellerId === account.id);
-      const counts = { open: 0, joined: 0, funded: 0, released: 0, refunded: 0, cancelled: 0 };
-      let sent = 0, received = 0, feesPaid = 0, inEscrow = 0;
+      const counts = { open: 0, joined: 0, awaiting_setup: 0, funding: 0, funded: 0, delivered: 0, disputed: 0, released: 0, refunded: 0, cancelled: 0 };
+      let sent = 0, received = 0, feesPaid = 0, onHold = 0;
       const toRelease = []; // ms from creation to release
       const fundedToRelease = []; // ms from funding to release
       const start = now() - (days - 1) * DAY_MS;
@@ -700,12 +925,15 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       const series = new Map();
       for (let i = 0; i < days; i++) series.set(dayKey(start + i * DAY_MS), { date: dayKey(start + i * DAY_MS), volume: 0, deals: 0 });
       for (const d of mine) {
-        counts[d.state]++;
-        if (d.state === "funded") inEscrow += d.amount;
+        if (counts[d.state] != null) counts[d.state]++;
+        if (d.state === "funded" || d.state === "delivered" || d.state === "disputed") onHold += d.amount;
         if (d.state !== "released") continue;
-        const fee = Math.floor((d.amount * FEE_BPS) / 10000);
-        if (d.buyerId === account.id) sent += d.amount;
-        else { received += d.amount - fee; feesPaid += fee; }
+        const p = d.payment || {};
+        if (d.buyerId === account.id) sent += p.amount == null ? d.amount : p.amount;
+        else {
+          received += p.sellerNet == null ? d.amount : p.sellerNet;
+          feesPaid += p.processorFee == null ? 0 : p.processorFee; // the seller is the merchant, so the card fee is theirs
+        }
         const at = releasedAt(d);
         if (at) {
           toRelease.push(at - d.createdAt);
@@ -723,11 +951,11 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       };
       const finished = counts.released + counts.refunded + counts.cancelled;
       return {
-        currency: "play-credits",
+        currency: money.DEFAULT_CURRENCY,
         totalDeals: mine.length,
         counts,
-        active: counts.open + counts.joined + counts.funded,
-        volume: { total: sent + received + feesPaid, sent, received, feesPaid, inEscrow },
+        active: counts.open + counts.joined + counts.awaiting_setup + counts.funding + counts.funded + counts.delivered + counts.disputed,
+        volume: { total: sent + received, sent, received, feesPaid, onHold },
         completionRate: finished ? counts.released / finished : null,
         durationMs: {
           avgCreatedToReleased: avg(toRelease),
@@ -942,8 +1170,6 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
       return {
         schema: SNAPSHOT_SCHEMA,
         savedAt: new Date(now()).toISOString(),
-        minted,
-        platformBalance: platform.balance,
         accounts: [...accounts.values()].map((a) => ({
           ...a,
           salt: a.salt ? a.salt.toString("hex") : undefined,
@@ -951,13 +1177,14 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
         })),
         sessions: [...sessions.entries()],
         deals: [...deals.values()],
-        ledger,
+        events,
         tickets: [...tickets.values()],
         ticketSeq,
       };
     },
 
-    importState(state) {
+    importState(raw) {
+      const state = migrate(raw);
       if (!state || state.schema !== SNAPSHOT_SCHEMA) throw new Error("Unknown snapshot schema: " + (state && state.schema));
       if (accounts.size || deals.size) throw new Error("importState needs an empty store");
       for (const raw of state.accounts) {
@@ -974,23 +1201,33 @@ function createStore({ now = () => Date.now(), testCodes = new Map() } = {}) {
         deals.set(d.id, d);
         if (d.state === "open") dealsByInvite.set(d.inviteCode, d.id); // invites are only live while a deal is open
       }
-      ledger.push(...state.ledger);
+      events.push(...(state.events || []));
       for (const t of state.tickets || []) tickets.set(t.id, t); // older snapshots have no tickets
       ticketSeq = state.ticketSeq || 0;
-      platform.balance = state.platformBalance;
-      minted = state.minted;
     },
 
-    // Credits are only ever created by welcome grants and test codes, and never lost after that.
+    // There are no balances to balance. What we can check is that every deal claiming to hold
+    // money has a payment to point at, and that no payment is attached to two deals.
     audit() {
-      let held = 0;
-      for (const d of deals.values()) if (d.state === "funded") held += d.amount;
-      let balances = 0;
-      for (const a of accounts.values()) balances += a.balance;
-      const actual = balances + held + platform.balance;
-      return { ok: actual === minted, expected: minted, actual, accounts: accounts.size, deals: deals.size };
+      const refs = new Map();
+      const problems = [];
+      let onHold = 0, holdsAtRisk = 0;
+      for (const d of deals.values()) {
+        const p = d.payment;
+        if (["funded", "delivered", "disputed"].includes(d.state) && (!p || p.status !== "held")) {
+          problems.push(`${d.id} is ${d.state} with no held payment`);
+        }
+        if (!p || !p.intentId) continue;
+        if (refs.has(p.intentId)) problems.push(`${p.intentId} is attached to ${refs.get(p.intentId)} and ${d.id}`);
+        refs.set(p.intentId, d.id);
+        if (p.status === "held") {
+          onHold += p.amount;
+          if (money.holdAtRisk(p.authorizedAt, now())) holdsAtRisk++;
+        }
+      }
+      return { ok: problems.length === 0, problems, accounts: accounts.size, deals: deals.size, onHold, holdsAtRisk, currency: money.DEFAULT_CURRENCY };
     },
   };
 }
 
-module.exports = { createStore, parseTestCodes, STARTING_CREDITS, FEE_BPS, MAX_AMOUNT, DEAL_TYPES, TICKET_CATEGORIES };
+module.exports = { createStore, FEE_BPS, MIN_AMOUNT, MAX_AMOUNT, DEAL_TYPES, TICKET_CATEGORIES };
