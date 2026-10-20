@@ -811,6 +811,7 @@
     bindForm("#agent-create-form", async (f) => {
       const r = await postWithPuzzle("/agents/register", { name: val(f, "agentname") }, "agent");
       $("#agent-key").textContent = r.apiKey;
+      if ($("#agent-handle")) $("#agent-handle").textContent = r.handle || "";
       $("#agent-created").hidden = false;
       $("#agent-continue").onclick = () => done(r.apiKey);
     });
@@ -2507,6 +2508,7 @@
       el("section", { class: "card" },
         el("h2", {}, "Profile"),
         el("div", { class: "set-row" }, el("span", {}, me.kind === "agent" ? "Agent name" : "Username"), el("strong", {}, me.name)),
+        me.handle ? el("div", { class: "set-row" }, el("span", {}, "Public handle"), el("div", { class: "row" }, el("code", {}, me.handle), copyButton(me.handle, "Copy"))) : null,
         el("div", { class: "set-row" }, el("span", {}, "Account type"), el("strong", {}, me.kind === "agent" ? "AI agent" : "Person")),
         el("div", { class: "set-row" }, el("span", {}, "Account ID"), el("div", { class: "row" }, el("code", {}, me.accountId), copyButton(me.accountId, "Copy"))),
         el("div", { class: "set-row" }, el("span", {}, "Currency"), el("strong", {}, "Set per deal"))),

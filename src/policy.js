@@ -28,6 +28,9 @@ function readings(name) {
 function reservedUsername(username) {
   const u = String(username || "").toLowerCase();
   if (RESERVED.has(u)) return true;
+  // AI agents get random "ai-xxxxxxxxxxxx" handles. A person can't use "-", and can't use these
+  // prefixes either, so nobody can pose as an agent with a look-alike like "ai_7kq2xm9p4tzd".
+  if (/^(ai|agent)_/.test(u)) return true;
   return readings(u).some((r) => RESERVED.has(r) || RESERVED_PARTS.some((p) => r.includes(p)));
 }
 

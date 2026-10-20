@@ -45,6 +45,21 @@ const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const sha256Buf = (s) => crypto.createHash("sha256").update(s).digest();
 const randomId = (prefix) => `${prefix}_${crypto.randomBytes(9).toString("hex")}`;
 
+// An AI agent's public handle: assigned at random, never chosen, never derived from its name or IDs.
+// 12 characters from 31 (no 0/o, 1/i/l look-alikes) is about 59 bits, so handles can't be guessed or
+// listed by counting. People's usernames can't contain "-", so nobody can register a copy of one.
+const HANDLE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+function randomHandle() {
+  let out = "";
+  while (out.length < 12) {
+    for (const b of crypto.randomBytes(16)) {
+      // 248 = 31 * 8: dropping the top few byte values keeps every character equally likely
+      if (b < 248 && out.length < 12) out += HANDLE_ALPHABET[b % HANDLE_ALPHABET.length];
+    }
+  }
+  return "ai-" + out;
+}
+
 function newInviteCode() {
   let s = "";
   for (const byte of crypto.randomBytes(8)) s += INVITE_ALPHABET[byte % 32]; // 256 % 32 === 0, so unbiased
@@ -82,6 +97,13 @@ function createStore({ now = () => Date.now() } = {}) {
   const accounts = new Map(); // accountId -> account
   const byKeyHash = new Map(); // sha256(apiKey) -> account (AI agents)
   const byUsername = new Map(); // lowercase username -> account (people)
+  const byHandle = new Map(); // public handle -> account (AI agents)
+
+  function newHandle() {
+    let h;
+    do h = randomHandle(); while (byHandle.has(h));
+    return h;
+  }
   const sessions = new Map(); // sha256(sessionToken) -> { accountId, expiresAt }
   const deals = new Map(); // dealId -> deal
   const dealsByInvite = new Map(); // inviteCode -> dealId
@@ -121,6 +143,7 @@ function createStore({ now = () => Date.now() } = {}) {
 
   function publicAccount(a) {
     const out = { accountId: a.id, kind: a.kind, name: a.name, currency: money.DEFAULT_CURRENCY, payouts: payoutsView(a), palette: a.palette || PALETTES[0] };
+    if (a.handle) out.handle = a.handle;
     if (a.username) out.username = a.username;
     return out;
   }
@@ -140,7 +163,10 @@ function createStore({ now = () => Date.now() } = {}) {
 
   function party(id) {
     const a = id && accounts.get(id);
-    return a ? { id: a.id, name: a.name, kind: a.kind } : null;
+    if (!a) return null;
+    const p = { id: a.id, name: a.name, kind: a.kind };
+    if (a.handle) p.handle = a.handle;
+    return p;
   }
 
   function view(deal, viewerId) {
@@ -379,10 +405,12 @@ function createStore({ now = () => Date.now() } = {}) {
       const name = cleanText(rawName, "name", { max: 50 });
       checkCapacity();
       const apiKey = "vlc_" + crypto.randomBytes(24).toString("hex");
-      const agent = { id: randomId("agent"), kind: "agent", name, createdAt: now(), connect: null, keyHash: sha256(apiKey) };
+      // The handle is always generated here. Anything the caller sends (a handle, a username) is ignored.
+      const agent = { id: randomId("agent"), kind: "agent", name, handle: newHandle(), createdAt: now(), connect: null, keyHash: sha256(apiKey) };
       accounts.set(agent.id, agent);
       byKeyHash.set(agent.keyHash, agent);
-      return { agentId: agent.id, accountId: agent.id, kind: "agent", name: agent.name, apiKey };
+      byHandle.set(agent.handle, agent);
+      return { agentId: agent.id, accountId: agent.id, kind: "agent", name: agent.name, handle: agent.handle, apiKey };
     },
 
     async registerHuman(rawUsername, password) {
@@ -1223,13 +1251,25 @@ function createStore({ now = () => Date.now() } = {}) {
       const state = migrate(raw);
       if (!state || state.schema !== SNAPSHOT_SCHEMA) throw new Error("Unknown snapshot schema: " + (state && state.schema));
       if (accounts.size || deals.size) throw new Error("importState needs an empty store");
+      let changed = 0;
+      const needHandle = [];
       for (const raw of state.accounts) {
         const a = { ...raw };
         if (a.salt) a.salt = Buffer.from(a.salt, "hex");
         if (a.hash) a.hash = Buffer.from(a.hash, "hex");
         accounts.set(a.id, a);
-        if (a.kind === "agent") byKeyHash.set(a.keyHash, a);
+        if (a.kind === "agent") {
+          byKeyHash.set(a.keyHash, a);
+          if (a.handle && !byHandle.has(a.handle)) byHandle.set(a.handle, a);
+          else needHandle.push(a);
+        }
         if (a.kind === "human") byUsername.set(a.username, a);
+      }
+      // Agents saved before handles existed get one now. The caller saves straight away, so it never changes.
+      for (const a of needHandle) {
+        a.handle = newHandle();
+        byHandle.set(a.handle, a);
+        changed++;
       }
       const t = now();
       for (const [h, s] of state.sessions) if (s.expiresAt > t) sessions.set(h, s);
@@ -1240,6 +1280,7 @@ function createStore({ now = () => Date.now() } = {}) {
       events.push(...(state.events || []));
       for (const t of state.tickets || []) tickets.set(t.id, t); // older snapshots have no tickets
       ticketSeq = state.ticketSeq || 0;
+      return { changed };
     },
 
     // There are no balances to balance. What we can check is that every deal claiming to hold

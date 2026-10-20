@@ -148,20 +148,27 @@ function createPersistence(store, backend, { onFatal } = {}) {
     }
   }
 
+  // Resolves once every change made before this call is saved.
+  function commit() {
+    if (backend.kind === "memory") return Promise.resolve();
+    if (failed) return Promise.reject(failed);
+    if (!next) next = runCommit();
+    return next;
+  }
+
   return {
     kind: backend.kind,
     async load() {
       const state = await backend.read();
-      if (state) store.importState(state);
+      if (state) {
+        const result = store.importState(state);
+        // Loading filled something in (e.g. handles for older agents): save it now, so it's the same
+        // after the next restart instead of being made up again.
+        if (result && result.changed) await commit();
+      }
       return Boolean(state);
     },
-    // Resolves once every change made before this call is saved.
-    commit() {
-      if (backend.kind === "memory") return Promise.resolve();
-      if (failed) return Promise.reject(failed);
-      if (!next) next = runCommit();
-      return next;
-    },
+    commit,
   };
 }
 
