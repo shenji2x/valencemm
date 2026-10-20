@@ -13,7 +13,7 @@ async function start(opts = {}) {
   const stripe = fake
     ? createStripe({ secretKey: "sk_test_api", webhookSecret: fake.webhookSecret, apiBase, log: { error() {} } })
     : createStripe({ log: { error() {} } });
-  const server = createApp({ now: () => clock.t, stripe, skipTimers: true, ...opts });
+  const server = createApp({ now: () => clock.t, stripe, skipTimers: true, powDifficulty: 0, ...opts });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
 

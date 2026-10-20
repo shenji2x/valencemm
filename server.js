@@ -1,7 +1,9 @@
 const { createApp } = require("./src/app");
 
 const port = process.env.PORT || 8080;
-const server = createApp();
+// POW_SECRET signs anti-bot challenges. Optional with one instance (a random one is made at start);
+// set it if the service ever runs more than one instance, so they all accept each other's challenges.
+const server = createApp({ powSecret: process.env.POW_SECRET ? Buffer.from(process.env.POW_SECRET) : undefined });
 
 server.ready.then(
   (restored) => {
@@ -13,6 +15,7 @@ server.ready.then(
       console.log(`Security email: ${server.mailer.kind}${server.mailer.enabled ? "" : " (set EMAIL_PROVIDER, RESEND_API_KEY and EMAIL_FROM to turn on)"}`);
       console.log(`Card payments: ${server.stripe.configured ? "on" : "off (set STRIPE_SECRET_KEY to turn on)"}`);
       console.log(`Stripe webhooks: ${server.stripe.acceptsWebhooks ? "on" : "off (set STRIPE_WEBHOOK_SECRET to accept them)"}`);
+      console.log(`Anti-bot: proof-of-work on sign-up; client IPs from ${process.env.TRUST_CLOUDFLARE === "1" ? "Cloudflare (CF-Connecting-IP, verified)" : "Cloud Run (X-Forwarded-For)"}`);
       const audit = server.store.audit();
       console.log(`Deals: ${audit.ok ? "consistent" : "NEEDS ATTENTION: " + audit.problems.join("; ")} (${audit.accounts} accounts, ${audit.deals} deals)`);
       if (audit.holdsAtRisk) console.log(`${audit.holdsAtRisk} card hold(s) are close to expiring.`);

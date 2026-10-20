@@ -1,5 +1,6 @@
 const { ApiError } = require("./errors");
-const { clientIp, bearer, sendJson, readJson, readRaw, limiter } = require("./http");
+const { clientIp, ipKey, bearer, sendJson, readJson, readRaw, limiter, quota } = require("./http");
+const { createPow } = require("./pow");
 const { createSupport } = require("./support");
 const money = require("./money");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
@@ -25,22 +26,119 @@ function createApi(store, opts = {}) {
   const joinLimit = limiter({ windowMs: 60 * 1000, max: opts.joinLimit || 20, code: "join_rate_limited" });
   const payLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.payLimit || 40, code: "payment_rate_limited" });
 
+  // ---- anti-abuse ----
+  // Sign-ups and agent registrations need a solved proof-of-work (see pow.js), and each network can
+  // only create so many accounts a day. If sign-ups spike site-wide, the puzzle gets harder; if they
+  // spike absurdly, sign-ups pause for a few minutes. Logins get a puzzle only for a username that
+  // has just had several wrong passwords, so a guesser pays per guess but the real owner is never
+  // locked out by someone else's typing.
+  const clock = opts.now || Date.now;
+  const pow = opts.powEngine || createPow({ now: clock, secret: opts.powSecret });
+  const POW_BITS = opts.powDifficulty == null ? 18 : opts.powDifficulty; // 0 = not required (tests only)
+  const powOn = POW_BITS > 0;
+  const humanQuota = quota({ windowMs: 24 * 3600 * 1000, max: opts.signupDailyLimit || 6, code: "signup_daily_limit",
+    message: "Too many accounts have been created from your network today. Try again tomorrow." });
+  const agentQuota = quota({ windowMs: 24 * 3600 * 1000, max: opts.agentDailyLimit || 25, code: "agent_daily_limit",
+    message: "Too many agents have been registered from your network today. Try again tomorrow." });
+  const challengeLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.challengeLimit || 60, code: "challenge_rate_limited" });
+
+  const SURGE_WINDOW_MS = 10 * 60 * 1000;
+  const SURGE_HARDER = opts.surgeHarder || 40;   // sign-ups per 10 min before the puzzle gets 4x harder
+  const SURGE_HARDEST = opts.surgeHardest || 120; // ... 16x harder
+  const SURGE_PAUSE = opts.surgePause || 400;     // ... sign-ups pause
+  const recentSignups = [];
+  function signupBits() {
+    const t = clock();
+    while (recentSignups.length && recentSignups[0] <= t - SURGE_WINDOW_MS) recentSignups.shift();
+    const n = recentSignups.length;
+    if (n >= SURGE_PAUSE) {
+      const err = new ApiError(503, "signups_paused", "Sign-ups are very busy right now. Try again in a few minutes.");
+      err.headers = { "Retry-After": "300" };
+      throw err;
+    }
+    return POW_BITS + (n >= SURGE_HARDEST ? 4 : n >= SURGE_HARDER ? 2 : 0);
+  }
+  const countSignup = () => recentSignups.push(clock());
+
+  const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+  const PUZZLE_AFTER = opts.loginPuzzleAfter || 5; // wrong passwords for one username before a puzzle is needed
+  // Wrong passwords before the username pauses for 15 minutes. High on purpose: a low number would let
+  // anyone lock a real person out. 100 guesses per 15 minutes can't crack a reasonable password.
+  const LOCK_AFTER = opts.loginLockAfter || 100;
+  const loginFails = new Map(); // username -> timestamps of recent wrong passwords
+  function failsFor(username) {
+    const t = clock();
+    const recent = (loginFails.get(username) || []).filter((x) => x > t - LOGIN_WINDOW_MS);
+    if (recent.length) loginFails.set(username, recent);
+    else loginFails.delete(username);
+    return recent;
+  }
+  function recordFail(username) {
+    const recent = failsFor(username);
+    recent.push(clock());
+    loginFails.set(username, recent.slice(-LOCK_AFTER - 5));
+    if (loginFails.size > 20000) {
+      for (const k of [...loginFails.keys()]) if (!failsFor(k).length) loginFails.delete(k);
+      let extra = loginFails.size - 20000;
+      for (const k of loginFails.keys()) { if (extra-- <= 0) break; loginFails.delete(k); }
+    }
+  }
+
+  add("GET", "/challenge", { limit: challengeLimit }, ({ req }) => {
+    const scope = new URL(req.url, "http://localhost").searchParams.get("scope");
+    if (!["signup", "agent", "login"].includes(scope)) {
+      throw new ApiError(400, "invalid_scope", 'scope must be "signup", "agent" or "login"');
+    }
+    const bits = scope === "login" ? POW_BITS : signupBits();
+    return { body: { ...pow.issue(scope, Math.max(1, bits)), required: powOn } };
+  });
+
   // ---- accounts ----
-  add("POST", "/agents/register", { limit: registerLimit }, ({ body }) => ({
-    status: 201,
-    body: {
-      ...store.registerAgent(body.name),
-      currency: money.DEFAULT_CURRENCY,
-      notice: "Save your apiKey now. It is shown only once.",
-    },
-  }));
-  add("POST", "/humans/signup", { limit: registerLimit }, async ({ body }) => ({
-    status: 201,
-    body: await store.registerHuman(body.username, body.password),
-  }));
-  add("POST", "/humans/login", { limit: loginLimit }, async ({ body }) => ({
-    body: await store.loginHuman(body.username, body.password),
-  }));
+  add("POST", "/agents/register", { limit: registerLimit }, ({ body, ip }) => {
+    store.checkAgentName(body.name);
+    const bits = signupBits();
+    agentQuota.check(ip);
+    if (powOn) pow.verify(body.challenge, body.solution, "agent", bits);
+    const agent = store.registerAgent(body.name);
+    agentQuota.add(ip);
+    countSignup();
+    return {
+      status: 201,
+      body: { ...agent, currency: money.DEFAULT_CURRENCY, notice: "Save your apiKey now. It is shown only once." },
+    };
+  });
+  add("POST", "/humans/signup", { limit: registerLimit }, async ({ body, ip }) => {
+    // Hidden form field people never see. Browsers driven by bots tend to fill every input.
+    if (typeof body.website === "string" && body.website.trim() !== "") {
+      throw new ApiError(400, "signup_refused", "Sign-up couldn't be completed. Refresh the page and try again.");
+    }
+    store.checkSignup(body.username, body.password);
+    const bits = signupBits();
+    humanQuota.check(ip);
+    if (powOn) pow.verify(body.challenge, body.solution, "signup", bits);
+    const created = await store.registerHuman(body.username, body.password);
+    humanQuota.add(ip);
+    countSignup();
+    return { status: 201, body: created };
+  });
+  add("POST", "/humans/login", { limit: loginLimit }, async ({ body }) => {
+    const username = typeof body.username === "string" ? body.username.trim().toLowerCase().slice(0, 40) : "";
+    const fails = failsFor(username).length;
+    if (fails >= LOCK_AFTER) {
+      const err = new ApiError(429, "login_paused", "Too many wrong passwords for this username. Try again in 15 minutes.");
+      err.headers = { "Retry-After": String(LOGIN_WINDOW_MS / 1000) };
+      throw err;
+    }
+    if (powOn && fails >= PUZZLE_AFTER) pow.verify(body.challenge, body.solution, "login", POW_BITS);
+    try {
+      const result = await store.loginHuman(body.username, body.password);
+      loginFails.delete(username);
+      return { body: result };
+    } catch (err) {
+      if (err && err.code === "invalid_login") recordFail(username);
+      throw err;
+    }
+  });
   add("POST", "/logout", { auth: true }, ({ token }) => {
     store.logout(token);
     return { body: { ok: true } };
@@ -354,7 +452,7 @@ function createApi(store, opts = {}) {
   handleApiRef.discord = discord;
 
   return async function handleApi(req, res, apiPath) {
-    const ip = clientIp(req);
+    const ip = ipKey(clientIp(req));
     globalLimit(ip);
 
     let found = null;
@@ -415,7 +513,7 @@ function createApi(store, opts = {}) {
       if (hit) return sendJson(res, hit.status, hit.body, { "Idempotent-Replay": "true" });
     }
 
-    const result = await r.handler({ account, token, params, body, raw, req, res });
+    const result = await r.handler({ account, token, params, body, raw, req, res, ip });
     if (r.send) return; // the handler wrote the response itself
     // Every POST changes something. Don't answer until it's saved, so a success response
     // always means the change survives a restart.

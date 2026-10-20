@@ -75,17 +75,30 @@
       <li>Base URL: <code>https://valencemm.com/v1</code>. Requests and responses are JSON.</li>
       <li>Authenticate with <code>Authorization: Bearer &lt;apiKey or session token&gt;</code>.</li>
       <li>Amounts are integer cents in the deal's currency, from <code>500</code> ($5.00) to <code>2000000</code> ($20,000.00). Every fee is computed on the server: send the deal amount and currency, never a total.</li>
-      <li>The buyer pays the deal amount plus Valence's 1% (minimum NZ$0.50). The seller is the merchant on the charge and pays Stripe's card fee (2.7% + NZ$0.30 for NZ cards, 3.7% + NZ$0.30 for overseas cards). Each deal carries a <code>quote</code> with every figure.</li>
+      <li>The buyer pays the deal amount plus Valence's 1% (minimum 50 cents in the deal's currency). The seller is the merchant on the charge and pays Stripe's card fee, which depends on the seller's country and the buyer's card. Each deal carries a <code>quote</code> with every figure.</li>
       <li>Add an <code>Idempotency-Key</code> header (up to 64 characters) to POSTs on deals. A retry with the same key returns the original result instead of acting twice.</li>
       <li>Errors look like <code>{"error":{"code":"...","message":"..."}}</code>.</li>
+      <li>Too many requests get <code>429</code> with a <code>Retry-After</code> header (seconds). A <code>428</code> with code <code>challenge_required</code> means: solve an anti-bot challenge and send the request again (below).</li>
     </ul>
 
+    <h2>Anti-bot challenge</h2>
+    <p>Creating an account, and logging in after several wrong passwords, needs a small proof-of-work so scripts can't mass-claim usernames or guess passwords. Get a challenge with <code>GET /v1/challenge?scope=agent</code> (or <code>signup</code>, <code>login</code>). Find a whole number <code>n</code> such that <code>SHA-256(challenge + ":" + n)</code> starts with <code>difficulty</code> zero bits, then send <code>challenge</code> and <code>solution</code> (n, as a string) with the request. Each challenge works once and expires after 5 minutes. It takes well under a second:</p>
+<pre><code>import hashlib, requests
+c = requests.get("https://valencemm.com/v1/challenge?scope=agent").json()
+need, n = c["difficulty"], 0
+while int.from_bytes(hashlib.sha256(f'{c["challenge"]}:{n}'.encode()).digest(), "big") >> (256 - need):
+    n += 1
+agent = requests.post("https://valencemm.com/v1/agents/register",
+    json={"name": "buyer-bot", "challenge": c["challenge"], "solution": str(n)}).json()</code></pre>
+    <p>The difficulty goes up while sign-ups are unusually busy, so always read it from the challenge. Each network can create up to 6 accounts and 25 agents a day.</p>
+
     <h2>Quickstart (AI agents)</h2>
-<pre><code># 1. Register two agents (save each apiKey; it is shown once)
+<pre><code># 1. Register two agents, each with a solved challenge (see "Anti-bot challenge" above).
+#    Save each apiKey; it is shown once.
 curl -X POST https://valencemm.com/v1/agents/register \
-  -H "Content-Type: application/json" -d '{"name":"buyer-bot"}'
+  -H "Content-Type: application/json" -d '{"name":"buyer-bot","challenge":"...","solution":"..."}'
 curl -X POST https://valencemm.com/v1/agents/register \
-  -H "Content-Type: application/json" -d '{"name":"seller-bot"}'
+  -H "Content-Type: application/json" -d '{"name":"seller-bot","challenge":"...","solution":"..."}'
 
 # 2. The sender creates a deal and gets an inviteCode
 curl -X POST https://valencemm.com/v1/deals \
@@ -112,9 +125,10 @@ curl -X POST https://valencemm.com/v1/deals/DEAL_ID/release -H "Authorization: B
     <table>
       <thead><tr><th>Endpoint</th><th>What it does</th></tr></thead>
       <tbody>
-        <tr><td><code>POST /v1/agents/register</code></td><td>Body <code>{"name"}</code>. Returns <code>agentId</code> and <code>apiKey</code>. No auth needed.</td></tr>
-        <tr><td><code>POST /v1/humans/signup</code></td><td>Body <code>{"username","password"}</code>. Returns a session <code>token</code> and the account.</td></tr>
-        <tr><td><code>POST /v1/humans/login</code></td><td>Body <code>{"username","password"}</code>. Returns a session <code>token</code>.</td></tr>
+        <tr><td><code>GET /v1/challenge?scope=</code></td><td><code>scope</code> is <code>agent</code>, <code>signup</code> or <code>login</code>. Returns <code>challenge</code> and <code>difficulty</code> for the anti-bot check.</td></tr>
+        <tr><td><code>POST /v1/agents/register</code></td><td>Body <code>{"name","challenge","solution"}</code>. Returns <code>agentId</code> and <code>apiKey</code>. No auth needed.</td></tr>
+        <tr><td><code>POST /v1/humans/signup</code></td><td>Body <code>{"username","password","challenge","solution"}</code>. Returns a session <code>token</code> and the account. Some names (staff, the brand, look-alikes) are reserved, and very common passwords are refused.</td></tr>
+        <tr><td><code>POST /v1/humans/login</code></td><td>Body <code>{"username","password"}</code>. Returns a session <code>token</code>. After several wrong passwords for a username, also send <code>challenge</code> and <code>solution</code>.</td></tr>
         <tr><td><code>POST /v1/logout</code></td><td>Ends a person's session.</td></tr>
         <tr><td><code>GET /v1/me</code></td><td>Your account, payout readiness and recent payment events. There is no balance.</td></tr>
         <tr><td><code>POST /v1/deals</code></td><td>Body <code>{"type","title","amount","role","description","deadlineHours"}</code>. <code>role</code> is <code>buyer</code> (default) or <code>seller</code>. <code>amount</code> is integer cents. <code>deadlineHours</code> (1 to 720, default 72) runs from the moment the card is authorised, and is cut to the 7-day card hold if it would outlive it. Returns the deal with an <code>inviteCode</code>.</td></tr>

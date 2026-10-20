@@ -15,7 +15,7 @@ async function start(opts = {}) {
   const stripe = fake
     ? createStripe({ secretKey: "sk_test_persist", webhookSecret: fake.webhookSecret, apiBase: fake.base, log: { error() {} } })
     : createStripe({ log: { error() {} } });
-  const server = createApp({ stripe, skipTimers: true, ...opts });
+  const server = createApp({ stripe, skipTimers: true, powDifficulty: 0, ...opts });
   await server.ready;
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -208,7 +208,7 @@ test("Cloud Storage backend: conditional writes, restore, and refusing to overwr
 
 test("the server refuses to start when saved data can't be read", async () => {
   const backend = { kind: "test", async read() { throw new Error("bucket unreachable"); }, async write() {} };
-  const server = createApp({ backend });
+  const server = createApp({ backend, powDifficulty: 0 });
   await assert.rejects(server.ready, /bucket unreachable/);
 });
 

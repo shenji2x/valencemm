@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { createStore } = require("./store");
 const { createApi } = require("./api");
-const { sendJson } = require("./http");
+const { sendJson, limiter, clientIp, ipKey } = require("./http");
 const { createPersistence, backendFromEnv } = require("./persist");
 const { discordFromEnv } = require("./discord");
 const { blobsFromEnv } = require("./files");
@@ -61,7 +61,11 @@ const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
-  "Strict-Transport-Security": "max-age=15552000",
+  "Strict-Transport-Security": "max-age=31536000",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "X-Permitted-Cross-Domain-Policies": "none",
+  "Permissions-Policy": 'camera=(), microphone=(), geolocation=(), usb=(), serial=(), bluetooth=(), payment=(self "https://js.stripe.com")',
   "Content-Security-Policy":
     "default-src 'none'; script-src 'self' https://js.stripe.com; style-src 'self'; font-src 'self'; " +
     "connect-src 'self' https://api.stripe.com; img-src 'self' data: blob:; manifest-src 'self'; " +
@@ -76,7 +80,8 @@ function sendError(res, err, isApi) {
   if (res.headersSent) return res.end();
   if (isApi) {
     const message = known ? err.message : "Something went wrong";
-    return sendJson(res, status, { error: { code: known ? err.code : "internal", message } }, err.headers);
+    const extra = known && err.extra ? err.extra : {};
+    return sendJson(res, status, { error: { ...extra, code: known ? err.code : "internal", message } }, err.headers);
   }
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", ...(err.headers || {}) });
   res.end(known ? err.message : "Something went wrong");
@@ -93,9 +98,17 @@ function createApp(opts = {}) {
   const apiParts = {};
   const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, stripe, payments, exports: apiParts });
   const statics = loadStatic();
+  // Every request counts, pages and files included, not just the API. A normal visit is a few dozen
+  // requests; this only stops one address hammering the server.
+  const siteLimit = limiter({ windowMs: 60 * 1000, max: opts.siteLimit || 900, code: "rate_limited" });
 
   async function handle(req, res) {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+    try {
+      siteLimit(ipKey(clientIp(req)));
+    } catch (err) {
+      return sendError(res, err, String(req.url || "").startsWith("/v1"));
+    }
 
     // ai-mm.org, www.* etc. -> https://valencemm.com, keeping the path. 308 keeps POST as POST for API callers.
     const host = String(req.headers.host || "").toLowerCase().replace(/:\d+$/, "");
@@ -179,8 +192,12 @@ function createApp(opts = {}) {
   const server = http.createServer((req, res) => {
     handle(req, res).catch((err) => sendError(res, err, false));
   });
-  server.headersTimeout = 20 * 1000;
+  // Slow-request defences: a client must send its headers within 10s and the whole request within 30s,
+  // with at most 64 headers, and an idle keep-alive connection is closed after 5s.
+  server.headersTimeout = 10 * 1000;
   server.requestTimeout = 30 * 1000;
+  server.keepAliveTimeout = 5 * 1000;
+  server.maxHeadersCount = 64;
   server.store = store;
   server.persistence = persistence;
   server.discord = discord;

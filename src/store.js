@@ -7,6 +7,7 @@ const { promisify } = require("util");
 const { ApiError } = require("./errors");
 const sec = require("./security");
 const money = require("./money");
+const { reservedUsername, weakPassword } = require("./policy");
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -343,7 +344,37 @@ function createStore({ now = () => Date.now() } = {}) {
     if (accounts.size >= MAX_ACCOUNTS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
   }
 
+  // Every rule a new person's username and password must pass. Throws the first one that fails.
+  function validateSignup(rawUsername, password) {
+    const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : "";
+    if (!/^[a-z0-9_]{3,20}$/.test(username)) {
+      throw new ApiError(400, "invalid_username", "Username must be 3-20 letters, numbers or underscores");
+    }
+    if (typeof password !== "string" || password.length < 8 || password.length > 128) {
+      throw new ApiError(400, "invalid_password", "Password must be 8-128 characters");
+    }
+    if (reservedUsername(username)) throw new ApiError(400, "username_reserved", "That username is reserved. Pick another one.");
+    const weak = weakPassword(password, username);
+    if (weak) throw new ApiError(400, "weak_password", weak);
+    if (byUsername.has(username)) throw new ApiError(409, "username_taken", "That username is taken");
+    return username;
+  }
+
   return {
+    // Runs the sign-up checks without creating anything, so the API can refuse a taken or reserved
+    // name before the caller's proof-of-work is spent.
+    checkSignup(rawUsername, password) {
+      validateSignup(rawUsername, password);
+      checkCapacity();
+      return true;
+    },
+
+    checkAgentName(rawName) {
+      cleanText(rawName, "name", { max: 50 });
+      checkCapacity();
+      return true;
+    },
+
     registerAgent(rawName) {
       const name = cleanText(rawName, "name", { max: 50 });
       checkCapacity();
@@ -355,15 +386,8 @@ function createStore({ now = () => Date.now() } = {}) {
     },
 
     async registerHuman(rawUsername, password) {
-      const username = typeof rawUsername === "string" ? rawUsername.trim().toLowerCase() : "";
-      if (!/^[a-z0-9_]{3,20}$/.test(username)) {
-        throw new ApiError(400, "invalid_username", "Username must be 3-20 letters, numbers or underscores");
-      }
-      if (typeof password !== "string" || password.length < 8 || password.length > 128) {
-        throw new ApiError(400, "invalid_password", "Password must be 8-128 characters");
-      }
+      const username = validateSignup(rawUsername, password);
       checkCapacity();
-      if (byUsername.has(username)) throw new ApiError(409, "username_taken", "That username is taken");
       const salt = crypto.randomBytes(16);
       const hash = await scrypt(password, salt, 64);
       // re-check after the await: another signup may have claimed the name meanwhile
@@ -879,6 +903,8 @@ function createStore({ now = () => Date.now() } = {}) {
       if (typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128) {
         throw new ApiError(400, "invalid_password", "New password must be 8-128 characters");
       }
+      const weak = weakPassword(newPassword, account.username);
+      if (weak) throw new ApiError(400, "weak_password", weak);
       if (typeof currentPassword !== "string" || currentPassword.length > 128) throw new ApiError(401, "invalid_login", "Current password is wrong");
       const check = await scrypt(currentPassword, account.salt, 64);
       if (!crypto.timingSafeEqual(check, account.hash)) throw new ApiError(401, "invalid_login", "Current password is wrong");

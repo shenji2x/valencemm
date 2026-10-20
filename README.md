@@ -37,6 +37,25 @@ Set these on the Cloud Run service (never in this repo, it is public). With no k
 
 Card details are entered into Stripe's own iframe and never reach this server. The CSP allows `js.stripe.com` for that and nothing else from outside.
 
+## Security and abuse protection
+
+| Threat | What stops it |
+| --- | --- |
+| Scripts mass-claiming usernames | Sign-ups and agent registrations need a solved proof-of-work (`src/pow.js`): about 0.3s in a desktop browser, paid again for every account. Each network can create 6 accounts and 25 agents a day (counted on success, so typos don't count). IPv6 is counted per /64, so rotating addresses doesn't help. |
+| A sign-up flood | Site-wide: over 40 sign-ups in 10 minutes makes the puzzle 4x harder, over 120 makes it 16x harder, and over 400 pauses sign-ups for a few minutes. |
+| Impersonation names | Staff, brand and payment words (`admin`, `support`, `valence`, `stripe`, ...) and look-alikes (`v4lence_supp0rt`) are reserved (`src/policy.js`). Existing accounts are untouched. |
+| Form-filling bots | A hidden honeypot field on the sign-up form. |
+| Password guessing | Per IP: 30 logins per 10 minutes. Per username: after 5 wrong passwords in 15 minutes each further try needs a puzzle; after 100 the username pauses for 15 minutes. Common and sequence passwords are refused. 2FA codes lock after 5 wrong tries. |
+| Floods from one address | Every request (pages included) is limited to 900 a minute per address, and the API to 300. Slow or oversized requests are cut off (10s for headers, 30s per request, 64 headers, 10 KB JSON bodies). |
+| Injected pages and clickjacking | Strict CSP (only this site and Stripe), `frame-ancestors 'none'`, COOP/CORP, `nosniff`, HSTS and a locked-down Permissions-Policy. Sessions use a bearer header, not cookies, so there is no CSRF. |
+
+Rate limits are in memory, so they belong to one server instance (run with max instances = 1, as above). They slow abuse down, but a large distributed flood has to be absorbed before it reaches Cloud Run. For that, put the domain behind Cloudflare (free plan) and set:
+
+| Setting | What it does |
+| --- | --- |
+| `TRUST_CLOUDFLARE=1` | Reads the visitor's address from `CF-Connecting-IP`, but only when the request really came from a Cloudflare edge, so nobody can skip Cloudflare and claim another address. Without it, every visitor would look like a Cloudflare server and share one rate limit. |
+| `POW_SECRET` | Optional. Signs the anti-bot challenges. Only needed if the service ever runs more than one instance. |
+
 ## Saving data
 
 The server keeps its working copy in memory and saves a full snapshot after every change, before it answers the request. On startup it loads the last snapshot. Where it saves depends on the environment:
@@ -79,6 +98,8 @@ Attachments are images only (PNG, JPEG, GIF, WebP), checked by their actual file
 
 - `server.js`: starts the server
 - `src/store.js`: accounts, sessions, deals and their payment records (there are no balances)
+- `src/pow.js`: anti-bot proof-of-work challenges
+- `src/policy.js`: reserved usernames and the common-password check
 - `src/money.js`: amounts in cents, the fee rules and quotes
 - `src/stripe.js`: the Stripe Connect client and webhook signature checks
 - `src/payments.js`: funding, release, refunds, auto-release and the hold-expiry sweep

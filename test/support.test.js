@@ -113,7 +113,7 @@ function signer() {
 
 async function start(opts = {}) {
   const clock = { t: Date.parse("2026-10-19T00:00:00Z") };
-  const server = createApp({ now: () => clock.t, loginLimit: 500, ...opts });
+  const server = createApp({ now: () => clock.t, loginLimit: 500, powDifficulty: 0, ...opts });
   await server.ready;
   await server.commandsRegistered;
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
