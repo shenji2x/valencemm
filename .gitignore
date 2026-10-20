@@ -2,3 +2,6 @@ node_modules
 .env
 data/
 *.tmp
+
+# UI/UX Pro Max design skill (local dev aid, installed via the skill repo)
+.claude/
