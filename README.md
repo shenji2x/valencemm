@@ -94,6 +94,6 @@ Attachments are images only (PNG, JPEG, GIF, WebP), checked by their actual file
 - `src/app.js`: ties it together, serves the pages and security headers
 - `public/`: the website (home, log in, sign up, docs, and the dashboard app: overview, stats, new deal, join, active and past deals, payments, support, FAQ, settings)
 - `public/vendor/`: GSAP 3.15 (+ ScrollTrigger) and Lenis 1.3.27, served from our own origin (the only outside script allowed is Stripe.js)
-- `public/fonts/`: Roboto (Apache 2.0) and JetBrains Mono (SIL OFL), subset to Latin
+- `public/fonts/`: IBM Plex Sans and JetBrains Mono (both SIL OFL), subset to Latin
 - `public/vendor/qrcode.js`: QR code generator (MIT) for the authenticator setup screen
 - `test/`: tests, including `fakestripe.js`, a local stand-in for Stripe

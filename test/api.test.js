@@ -127,6 +127,17 @@ test("people: signup, login, session token works like an API key, logout ends it
   assert.equal((await ctx.call("GET", "/v1/me", { key: s.token })).status, 200);
 }));
 
+test("a customer's colour theme is saved on their account and defaults to blue", () => withServer(async (ctx) => {
+  const alice = await ctx.human("alice");
+  assert.equal((await ctx.call("GET", "/v1/me", { key: alice.token })).json.palette, "blue");
+  assert.equal((await ctx.call("POST", "/v1/account/palette", { key: alice.token, body: { palette: "violet" } })).status, 200);
+  assert.equal((await ctx.call("GET", "/v1/me", { key: alice.token })).json.palette, "violet");
+  const bad = await ctx.call("POST", "/v1/account/palette", { key: alice.token, body: { palette: "plaid" } });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.code, "invalid_palette");
+  assert.equal((await ctx.call("POST", "/v1/account/palette", { body: { palette: "teal" } })).status, 401);
+}));
+
 test("human to human and AI and human deals respect account types", () => withServer(async (ctx) => {
   const ann = await human("ann");
   async function human(name) { const r = await ctx.human(name); return { key: r.token }; }
@@ -405,10 +416,10 @@ test("vendored GSAP, Lenis and self-hosted fonts are served from our own origin"
     assert.equal(r.status, 200, path);
     assert.match(r.headers.get("content-type"), /javascript/, path);
   }
-  for (const path of ["/fonts/roboto-400.woff", "/fonts/roboto-700.woff", "/fonts/jetbrains-mono-500.woff"]) {
+  for (const path of ["/fonts/ibm-plex-sans-400.woff2", "/fonts/ibm-plex-sans-700.woff2", "/fonts/jetbrains-mono-500.woff"]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
-    assert.match(r.headers.get("content-type"), /font\/woff/, path);
+    assert.match(r.headers.get("content-type"), /font\/woff2?/, path);
   }
   assert.match((await ctx.call("GET", "/")).headers.get("content-security-policy"), /font-src 'self'/);
   // subfolder pages are not exposed without their extension, and folders aren't listed

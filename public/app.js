@@ -81,6 +81,8 @@
     wallet: "M3 7h18v12H3zM3 7l3-4h12l3 4M16 13h2",
     check: "M5 12l5 5 9-10",
     clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+    bitcoin: "M9 4v16M13 4v2M13 18v2M7 6h7.5a3 3 0 0 1 0 6H7M7 12h8.5a3 3 0 0 1 0 6H7",
+    bolt: "M13 2L4 14h7l-1 8 9-12h-7z",
     coins: "M8 8a5 3 0 1 0 0-.01M3 8v4c0 1.7 2.2 3 5 3s5-1.3 5-3V8M11 14c0 1.7 2.2 3 5 3s5-1.3 5-3v-4c0-1.7-2.2-3-5-3",
     arrowUp: "M12 19V5M5 12l7-7 7 7",
     arrowDown: "M12 5v14M5 12l7 7 7-7",
@@ -154,9 +156,36 @@
   const kindLabel = (kind) => (kind === "agent" ? "AI agent" : "person");
 
   // ---------- session and API ----------
-  const getToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } };
-  const setToken = (t) => {
-    try { if (t) sessionStorage.setItem(TOKEN_KEY, t); else sessionStorage.removeItem(TOKEN_KEY); } catch { /* storage blocked */ }
+  // A normal sign-in lives in this tab only. "Remember me" keeps it in localStorage for 7 days,
+  // the same lifetime the server gives every session.
+  const REMEMBER_UNTIL_KEY = "valence_token_until";
+  const REMEMBER_MS = 7 * 24 * 3600 * 1000;
+  const getToken = () => {
+    try {
+      const t = sessionStorage.getItem(TOKEN_KEY);
+      if (t) return t;
+      const until = Number(localStorage.getItem(REMEMBER_UNTIL_KEY));
+      if (until > Date.now()) return localStorage.getItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REMEMBER_UNTIL_KEY);
+    } catch { /* storage blocked */ }
+    return null;
+  };
+  const setToken = (t, remember = false) => {
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REMEMBER_UNTIL_KEY);
+      if (!t) {
+        localStorage.removeItem(PALETTE_KEY);
+        document.documentElement.removeAttribute("data-palette");
+      } else if (remember) {
+        localStorage.setItem(TOKEN_KEY, t);
+        localStorage.setItem(REMEMBER_UNTIL_KEY, String(Date.now() + REMEMBER_MS));
+      } else {
+        sessionStorage.setItem(TOKEN_KEY, t);
+      }
+    } catch { /* storage blocked */ }
   };
   function goLogin() {
     location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
@@ -374,7 +403,24 @@
 
   // ---------- theme ----------
   const THEME_KEY = "valence_theme";
-  const THEME_COLORS = { dark: "#05070d", light: "#f5f7fc" };
+  // A signed-in customer's colour theme. theme.js applies the cached copy before paint, and only
+  // while someone is signed in; the account holds the real choice so it follows them across devices.
+  const PALETTE_KEY = "valence_palette";
+  const PALETTES = [
+    ["blue", "Ocean blue", "The default"],
+    ["teal", "Lagoon", "Teal and cyan"],
+    ["violet", "Amethyst", "Violet and indigo"],
+    ["emerald", "Emerald", "Fresh greens"],
+    ["sunset", "Sunset", "Amber and rose"],
+    ["graphite", "Graphite", "Quiet greys"],
+  ];
+  function applyPalette(palette) {
+    const p = PALETTES.some(([k]) => k === palette) && palette !== "blue" ? palette : null;
+    if (p) document.documentElement.setAttribute("data-palette", p);
+    else document.documentElement.removeAttribute("data-palette");
+    try { if (p) localStorage.setItem(PALETTE_KEY, p); else localStorage.removeItem(PALETTE_KEY); } catch { /* storage blocked */ }
+  }
+  const THEME_COLORS = { dark: "#060a16", light: "#f5f8ff" };
   function systemTheme() {
     return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   }
@@ -421,17 +467,10 @@
     }
   }
 
-  // The glowing columns rise on load, then drift slowly. One orchestrated moment.
+  // The preview chart draws itself on load, and the steps rule fills as you scroll.
   function heroMotion() {
     const gsap = window.gsap;
     if (!gsap || reducedMotion()) return;
-    for (const group of document.querySelectorAll(".bars")) {
-      const bars = group.querySelectorAll("i");
-      gsap.from(bars, { scaleY: 0, duration: 1.2, ease: "power3.out", stagger: { each: 0.04, from: "random" } });
-      bars.forEach((b) => {
-        gsap.to(b, { scaleY: () => 0.75 + Math.random() * 0.5, duration: () => 3 + Math.random() * 3, ease: "sine.inOut", repeat: -1, yoyo: true, delay: 1.2 + Math.random() });
-      });
-    }
     const line = $("#mock-line");
     if (line && line.getTotalLength) {
       const len = line.getTotalLength();
@@ -441,6 +480,12 @@
     const fill = $("#steps-fill");
     if (fill && window.ScrollTrigger) {
       gsap.fromTo(fill, { scaleX: 0 }, { scaleX: 1, ease: "none", scrollTrigger: { trigger: ".steps-wrap", start: "top 85%", end: "bottom 55%", scrub: 0.6 } });
+    }
+    // cards rise into place as each section scrolls in
+    if (window.ScrollTrigger) {
+      for (const group of document.querySelectorAll(".types, .features, .coins")) {
+        gsap.from(group.children, { y: 24, opacity: 0, duration: 0.7, ease: "power3.out", stagger: 0.06, scrollTrigger: { trigger: group, start: "top 85%", once: true } });
+      }
     }
   }
 
@@ -466,7 +511,11 @@
     for (const a of document.querySelectorAll("a[data-keep-next]")) {
       if (next !== "/dashboard") a.href = a.getAttribute("href") + "?next=" + encodeURIComponent(next);
     }
-    return (token) => { setToken(token); location.href = next; };
+    return (token) => {
+      const box = $("#remember");
+      setToken(token, !!(box && box.checked));
+      location.href = next;
+    };
   }
   function signupPage() {
     const done = authDone();
@@ -595,6 +644,7 @@
 
   async function refreshMe() {
     app.me = await api("GET", "/me");
+    applyPalette(app.me.palette);
     return app.me;
   }
   function setCounts(deals) {
@@ -660,6 +710,7 @@
     av.textContent = me.name.slice(0, 1);
     if (me.kind === "agent") av.classList.add("agent");
     $("#logout").addEventListener("click", logout);
+    $("#top-logout").addEventListener("click", logout);
     try {
       const n = sessionStorage.getItem("valence_notice");
       if (n) { sessionStorage.removeItem("valence_notice"); setTimeout(() => toast(n), 600); }
@@ -698,7 +749,7 @@
     const light = document.documentElement.getAttribute("data-theme") === "light";
     return {
       theme: light ? "stripe" : "night",
-      variables: { colorPrimary: "#4c8dff", borderRadius: "10px", fontFamily: "Roboto, system-ui, sans-serif" },
+      variables: { colorPrimary: light ? "#2563eb" : "#5b93ff", borderRadius: "10px", fontFamily: "\"IBM Plex Sans\", system-ui, sans-serif" },
     };
   }
 
@@ -805,8 +856,9 @@
   }
 
   // ---------- shared pieces ----------
-  function tile(iconName, value, label, accent) {
-    return el("div", { class: "tile" + (accent ? " accent" : "") }, el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("b", { class: "num" }, value), el("span", {}, label)));
+  // tone: blue, sky, cyan, indigo, violet or teal, so a row of tiles reads as a family of blues
+  function tile(iconName, value, label, tone = "blue") {
+    return el("div", { class: "tile tone-" + tone }, el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("b", { class: "num" }, value), el("span", {}, label)));
   }
   function roleText(d) {
     return d.yourRole === "buyer" ? "you're paying" : "you're getting paid";
@@ -854,13 +906,16 @@
       const attention = active.filter(needsMe);
       const waiting = active.filter((d) => !needsMe(d));
       put(box,
-        el("h2", {}, `Welcome back, ${me.name}`),
-        el("p", { class: "muted" }, attention.length ? `${attention.length} deal${attention.length > 1 ? "s" : ""} need${attention.length > 1 ? "" : "s"} you.` : "Here's how your deals are going."),
+        el("section", { class: "welcome" },
+          el("div", {},
+            el("h2", {}, `Welcome back, ${me.name}`),
+            el("p", {}, attention.length ? `${attention.length} deal${attention.length > 1 ? "s" : ""} need${attention.length > 1 ? "" : "s"} you.` : "Here's how your deals are going.")),
+          el("div", { class: "row" }, btnLink("#new", "New deal"), btnLink("#join", "Join a deal", "secondary"))),
         el("div", { class: "tiles" },
-          tile("wallet", fmt(stats.volume.onHold, stats.currency), "Held right now", true),
-          tile("deals", String(active.length), "Active deals"),
-          tile("check", String(stats.counts.released), "Completed deals"),
-          tile("coins", fmt(stats.volume.total, stats.currency), "Volume")),
+          tile("wallet", fmt(stats.volume.onHold, stats.currency), "Held right now", "blue"),
+          tile("deals", String(active.length), "Active deals", "sky"),
+          tile("check", String(stats.counts.released), "Completed deals", "teal"),
+          tile("coins", fmt(stats.volume.total, stats.currency), "Volume", "indigo")),
         el("div", { class: "two" },
           el("section", { class: "card" },
             el("h2", {}, "Needs you"),
@@ -870,12 +925,14 @@
             waiting.length ? el("ul", { class: "list" }, waiting.slice(0, 5).map(dealItem)) : null),
           el("section", { class: "card" },
             el("h2", {}, "Recent activity"),
-            me.recentLedger.length
-              ? el("ul", { class: "list" }, me.recentLedger.slice(0, 8).map((e) => el("li", {}, el("div", { class: "item" },
-                el("span", { class: "page-ico" }, icon(e.delta >= 0 ? "arrowDown" : "arrowUp")),
-                el("div", { class: "grow" }, el("span", { class: "t" }, e.memo), el("span", { class: "s" }, ago(e.at))),
-                el("span", { class: "amt num" }, `${e.delta > 0 ? "+" : ""}${fmt(e.delta)}`)))))
-              : el("p", { class: "muted" }, "No activity yet."))));
+            (me.recentPayments || []).length
+              ? el("ul", { class: "list" }, me.recentPayments.slice(0, 8).map((e) => el("li", {}, el("div", { class: "item" },
+                el("span", { class: "page-ico tone-" + (e.direction === "in" ? "teal" : e.direction === "out" ? "sky" : "indigo") },
+                  icon(e.direction === "out" ? "arrowUp" : e.direction === "in" ? "arrowDown" : "clock")),
+                el("div", { class: "grow" }, el("span", { class: "t" }, PAYMENT_LABELS[e.event] || e.event), el("span", { class: "s" }, ago(e.at))),
+                e.amount == null ? null : el("span", { class: "amt num" + (e.direction === "in" ? " in" : "") },
+                  `${e.direction === "out" ? "\u2212" : e.direction === "in" ? "+" : ""}${fmt(e.amount, e.currency || stats.currency)}`)))))
+              : el("p", { class: "muted" }, "No activity yet. Payments show up here once a deal is funded."))));
     }
     draw(deals, stats, me);
     let last = JSON.stringify([deals, stats]);
@@ -897,6 +954,8 @@
     const slot = plotW / daily.length;
     const bw = Math.max(2, slot - 2); // 2px gap between bars
     const chart = svg("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Released volume per day for the last 30 days" });
+    put(chart, svg("defs", {}, svg("linearGradient", { id: "bar-fill", x1: 0, y1: 0, x2: 0, y2: 1 },
+      svg("stop", { offset: "0%", class: "b1" }), svg("stop", { offset: "100%", class: "b2" }))));
     for (let i = 0; i <= 4; i++) {
       const y = T + plotH - (plotH * i) / 4;
       put(chart, svg("line", { class: "gridline", x1: L, x2: W, y1: y, y2: y }));
@@ -936,12 +995,12 @@
     const maxCount = Math.max(1, ...states.map((k) => s.counts[k]));
     put(view,
       el("div", { class: "tiles" },
-        tile("coins", fmt(s.volume.total, s.currency), "Total volume", true),
-        tile("arrowUp", fmt(s.volume.sent), "Sent"),
-        tile("arrowDown", fmt(s.volume.received), "Received"),
-        tile("clock", duration(s.durationMs.avgFundedToReleased), "Avg time held"),
-        tile("percent", pct, "Completion rate"),
-        tile("wallet", fmt(s.volume.onHold, s.currency), "Held right now")),
+        tile("coins", fmt(s.volume.total, s.currency), "Total volume", "blue"),
+        tile("arrowUp", fmt(s.volume.sent), "Sent", "sky"),
+        tile("arrowDown", fmt(s.volume.received), "Received", "teal"),
+        tile("clock", duration(s.durationMs.avgFundedToReleased), "Avg time held", "cyan"),
+        tile("percent", pct, "Completion rate", "indigo"),
+        tile("wallet", fmt(s.volume.onHold, s.currency), "Held right now", "violet")),
       el("section", { class: "card" },
         el("div", { class: "row between" }, el("h2", {}, "Released volume, last 30 days"), el("span", { class: "dim" }, "Hover a bar for the day's total")),
         s.daily.some((d) => d.volume > 0) ? barChart(s.daily) : el("p", { class: "muted" }, "No released deals in the last 30 days yet. Once deals complete, their volume shows up here day by day.")),
@@ -1254,6 +1313,7 @@
 
     // True while the buyer has the card form open, so a poll can't tear it down under them.
     let paying = false;
+    let payMethod = "card";
 
     async function ask(action, promptText, okText, extra = {}) {
       const answer = promptText ? prompt(promptText) : "";
@@ -1328,6 +1388,16 @@
             el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`),
             breakdown(q));
           if (!paying) {
+            const methods = el("div", { class: "seg", role: "group", "aria-label": "Pay with" });
+            for (const [k, l] of [["card", "Card"], ["crypto", "Crypto"]]) {
+              put(methods, el("button", { type: "button", "aria-pressed": String(payMethod === k), onclick: () => { payMethod = k; draw(); } }, l));
+            }
+            put(p, el("div", { class: "pay-with" }, el("span", {}, "Pay with"), methods));
+          }
+          if (!paying && payMethod === "crypto") {
+            put(p, cryptoPanel(),
+              el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+          } else if (!paying) {
             put(p, el("div", { class: "actions" },
               el("button", { type: "button", class: "btn", onclick: () => { paying = true; draw(); } }, `Pay ${fmt(q.buyerTotal, q.currency)}`),
               confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
@@ -1523,24 +1593,25 @@
   }
 
   // ---------- payments: what has moved, never what is "available" ----------
+  const PAYMENT_LABELS = {
+    payment_started: "Payment started",
+    funds_held: "Payment held",
+    payment_failed: "Payment failed",
+    released: "Released to the seller",
+    paid_out: "Paid out to you",
+    hold_released: "Hold released",
+    refunded: "Refunded",
+    delivered: "Marked delivered",
+    dispute_opened: "Dispute opened",
+    chargeback: "Chargeback",
+    payouts_started: "Payout setup started",
+    payouts_ready: "Payouts ready",
+  };
   async function viewPayments(view, _arg, gen) {
     const [history, payouts] = await Promise.all([api("GET", "/payments"), api("GET", "/payouts")]);
     if (!alive(gen)) return;
-    const LABELS = {
-      payment_started: "Payment started",
-      funds_held: "Payment held",
-      payment_failed: "Payment failed",
-      released: "Released to the seller",
-      paid_out: "Paid out to you",
-      hold_released: "Hold released",
-      refunded: "Refunded",
-      delivered: "Marked delivered",
-      dispute_opened: "Dispute opened",
-      chargeback: "Chargeback",
-      payouts_started: "Payout setup started",
-      payouts_ready: "Payouts ready",
-    };
     put(view, payoutsCard(payouts));
+    put(view, el("section", { class: "card" }, cryptoPanel()));
     if (!history.events.length) {
       put(view, el("section", { class: "card" },
         emptyState("Nothing here yet", "Once a deal is funded, every movement shows up here with the deal it belongs to.",
@@ -1558,11 +1629,32 @@
         el("thead", {}, el("tr", {}, el("th", {}, "When"), el("th", {}, "What"), el("th", {}, "Deal"), el("th", { class: "num" }, "Amount"))),
         el("tbody", {}, history.events.map((e) => el("tr", {},
           el("td", {}, when(e.at)),
-          el("td", {}, LABELS[e.event] || e.event, e.detail ? el("span", { class: "s" }, e.detail) : null),
+          el("td", {}, PAYMENT_LABELS[e.event] || e.event, e.detail ? el("span", { class: "s" }, e.detail) : null),
           el("td", {}, e.dealId ? el("a", { href: "#deal/" + encodeURIComponent(e.dealId) }, e.dealId.slice(0, 12)) : "\u2014"),
           el("td", { class: "num" + (e.direction === "in" ? " in" : e.direction === "out" ? " out" : "") },
             e.amount == null ? "\u2014" : `${e.direction === "out" ? "\u2212" : e.direction === "in" ? "+" : ""}${fmt(e.amount, e.currency || history.currency)}`)))))),
       el("p", { class: "dim" }, "These are completed movements, past tense. Valence holds no balance for you: every payment belongs to one deal."));
+  }
+
+  // Crypto checkout is planned through BTCPay Server. Until it's wired up this is a preview only:
+  // nothing here talks to the server or a wallet.
+  function cryptoPanel() {
+    const coin = (iconName, tone, name, sub) => el("li", { class: "tone-" + tone },
+      el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("strong", {}, name), el("small", {}, sub)));
+    return el("div", { class: "crypto" },
+      el("div", { class: "crypto-head" },
+        el("div", {}, el("strong", {}, "Pay with crypto"), el("p", { class: "muted" }, "Checkout will run through BTCPay Server, so payments go straight to a wallet, with no exchange in the middle.")),
+        el("span", { class: "badge soon" }, "Coming soon")),
+      el("ul", { class: "crypto-coins" },
+        coin("bitcoin", "sunset", "Bitcoin", "On-chain"),
+        coin("bolt", "violet", "Lightning", "Instant, low fees")),
+      el("div", { class: "crypto-invoice", "aria-hidden": "true" },
+        el("div", { class: "qr-ph" }),
+        el("div", { class: "grow" },
+          el("span", { class: "ph-line w60" }), el("span", { class: "ph-line w90" }), el("span", { class: "ph-line w40" }))),
+      el("div", { class: "actions" },
+        el("button", { type: "button", class: "btn", disabled: true }, icon("bitcoin"), "Pay with crypto")),
+      el("p", { class: "dim" }, "Crypto isn't switched on yet. Choose Card to fund this deal today."));
   }
 
   // Shown on the payments page and in settings.
@@ -1938,7 +2030,7 @@
       const on = s.twoFactor.app;
       const row = el("div", { class: "tfa-row" },
         el("div", { class: "tfa-head" },
-          el("span", { class: "page-ico" }, icon("phone")),
+          el("span", { class: "page-ico tone-sky" }, icon("phone")),
           el("div", { class: "grow" }, el("strong", {}, "Authenticator app"),
             el("p", { class: "muted" }, "Get a new 6-digit code every 30 seconds from an app on your phone. We suggest Google Authenticator; Microsoft Authenticator, Authy and 1Password work too.")),
           badge(on)),
@@ -1985,7 +2077,7 @@
       const can = s.emailAvailable && s.emailVerified;
       const row = el("div", { class: "tfa-row" },
         el("div", { class: "tfa-head" },
-          el("span", { class: "page-ico" }, icon("mail")),
+          el("span", { class: "page-ico tone-cyan" }, icon("mail")),
           el("div", { class: "grow" }, el("strong", {}, "Email codes"),
             el("p", { class: "muted" }, can ? `When you log in, we email a 6-digit code to ${s.email}.` : "Verify an email address above to use this.")),
           badge(on)),
@@ -2003,7 +2095,7 @@
       const left = s.twoFactor.recoveryCodesLeft;
       const row = el("div", { class: "tfa-row" },
         el("div", { class: "tfa-head" },
-          el("span", { class: "page-ico" }, icon("key")),
+          el("span", { class: "page-ico tone-indigo" }, icon("key")),
           el("div", { class: "grow" }, el("strong", {}, "Recovery codes"),
             el("p", { class: "muted" }, `${left} of 10 left. Use one to log in if you lose your phone or can't get to your email.`)),
           el("span", { class: "badge " + (left > 3 ? "ok" : "funded") }, `${left} left`)),
@@ -2060,6 +2152,30 @@
       } }, l));
     }
 
+    const swatches = el("div", { class: "palettes", role: "radiogroup", "aria-label": "Colour theme" });
+    const current = me.palette || "blue";
+    for (const [key, name, sub] of PALETTES) {
+      const b = el("button", { type: "button", class: "palette", role: "radio", "data-palette-preview": key, "aria-checked": String(key === current) },
+        el("span", { class: "palette-preview", "aria-hidden": "true" },
+          el("span", { class: "pp-bar" }), el("span", { class: "pp-side" }),
+          el("span", { class: "pp-card" }, el("i"), el("i"), el("i"))),
+        el("span", { class: "palette-name" }, name), el("span", { class: "palette-sub" }, sub));
+      b.addEventListener("click", async () => {
+        const before = document.documentElement.getAttribute("data-palette") || "blue";
+        applyPalette(key);
+        for (const x of swatches.children) x.setAttribute("aria-checked", String(x === b));
+        try {
+          await api("POST", "/account/palette", { palette: key }, { noRedirect: true });
+          app.me.palette = key;
+        } catch (err) {
+          applyPalette(before);
+          for (const x of swatches.children) x.setAttribute("aria-checked", String(x.getAttribute("data-palette-preview") === before));
+          toast(err.message);
+        }
+      });
+      put(swatches, b);
+    }
+
     put(view,
       el("section", { class: "card" },
         el("h2", {}, "Profile"),
@@ -2069,7 +2185,11 @@
         el("div", { class: "set-row" }, el("span", {}, "Currency"), el("strong", {}, "Set per deal"))),
       el("section", { class: "card" },
         el("h2", {}, "Appearance"),
-        el("div", { class: "set-row" }, el("span", {}, "Theme"), seg)));
+        el("div", { class: "set-row" }, el("span", {}, "Mode"), seg),
+        el("div", { class: "set-stack" },
+          el("span", {}, "Colour theme"),
+          el("p", { class: "hint" }, "Changes the site's colours for you while you're signed in. Saved to your account."),
+          swatches)));
 
     try {
       put(view, payoutsCard(await api("GET", "/payouts")));
@@ -2097,7 +2217,7 @@
     }
 
     put(view, el("section", { class: "card" }, el("h2", {}, "Sign out"),
-      el("p", { class: "muted" }, "Sign out of this browser tab."),
+      el("p", { class: "muted" }, "Sign out of Valence on this browser."),
       el("button", { type: "button", class: "btn secondary", onclick: logout }, "Log out")));
   }
 

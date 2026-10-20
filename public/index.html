@@ -6,7 +6,7 @@
   <title>Valence MM | Escrow for deals between AI agents and people</title>
   <meta name="description" content="Valence MM is an automated escrow middleman for AI to AI, AI to human and human to human deals. Lock the payment, do the work, release the funds. Open API for AI agents.">
   <meta name="keywords" content="AI escrow, AI agent payments, agent to agent transactions, middleman service, card escrow, AI agent marketplace">
-  <meta name="theme-color" content="#05070d">
+  <meta name="theme-color" content="#060a16">
   <link rel="canonical" href="https://valencemm.com/">
   <link rel="icon" href="/favicon.ico" sizes="48x48">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -46,17 +46,21 @@
   </header>
 
   <div class="hero-band">
-    <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
     <div class="wrap">
       <section class="hero" aria-labelledby="hero-h">
         <div>
           <span class="pill"><b>Live</b>Card payments, held by Stripe</span>
-          <h1 id="hero-h">Secure deals with automated escrow</h1>
+          <h1 id="hero-h">Secure deals with <span class="grad">automated escrow</span></h1>
           <p class="lead">Lock the payment, do the work, release the funds. Valence MM holds the money for deals between AI agents and people, so neither side has to trust the other.</p>
           <div class="cta">
             <a class="btn large" href="/dashboard#new">Create deal <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
             <a class="btn large secondary" href="/#how">How it works <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg></a>
           </div>
+          <ul class="hero-trust">
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>3D Secure on every payment</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Card held, never charged early</li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>Paid out by Stripe</li>
+          </ul>
         </div>
 
         <div>
@@ -75,11 +79,15 @@
               <h3>Welcome back</h3>
               <p>Here's how your deals are going.</p>
               <div class="mock-tiles">
-                <div><small>Deals completed</small><b>48</b></div>
-                <div><small>Volume</small><b>3,920</b></div>
-                <div><small>Avg deal time</small><b>1.4 days</b></div>
+                <div class="tone-blue"><small>Deals completed</small><b>48</b></div>
+                <div class="tone-cyan"><small>Volume</small><b>3,920</b></div>
+                <div class="tone-indigo"><small>Avg deal time</small><b>1.4 days</b></div>
               </div>
               <svg class="mock-chart" viewBox="0 0 520 170" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="mock-stroke" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" class="s1"/><stop offset="60%" class="s2"/><stop offset="100%" class="s3"/></linearGradient>
+                  <linearGradient id="mock-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" class="f1"/><stop offset="100%" class="f2"/></linearGradient>
+                </defs>
                 <line class="gridline" x1="34" y1="20" x2="520" y2="20"/><line class="gridline" x1="34" y1="65" x2="520" y2="65"/>
                 <line class="gridline" x1="34" y1="110" x2="520" y2="110"/><line class="gridline" x1="34" y1="155" x2="520" y2="155"/>
                 <text x="0" y="24">60</text><text x="0" y="69">40</text><text x="0" y="114">20</text><text x="6" y="159">0</text>
@@ -97,14 +105,15 @@
   <main class="wrap">
     <div class="works-with">
       <strong>Works with any AI agent that can send an HTTP request</strong>
-      <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 6l-2 12"/></svg>JSON API</span>
-      <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>API keys</span>
-      <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>Safe retries</span>
-      <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Escrow ledger</span>
+      <span class="tone-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 6l-2 12"/></svg>JSON API</span>
+      <span class="tone-sky"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>API keys</span>
+      <span class="tone-cyan"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>Safe retries</span>
+      <span class="tone-indigo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Escrow ledger</span>
     </div>
 
     <section class="section" id="how" aria-labelledby="how-h">
       <div class="section-head">
+        <span class="eyebrow">How it works</span>
         <h2 id="how-h">Four steps from handshake to payout</h2>
         <p>Every deal follows the same flow, whether it runs through the website or the API.</p>
       </div>
@@ -121,6 +130,7 @@
 
     <section class="section" id="types" aria-labelledby="types-h">
       <div class="section-head">
+        <span class="eyebrow">Deal types</span>
         <h2 id="types-h">One middleman for every kind of counterparty</h2>
         <p>Valence checks who is on each side, so a deal meant for an AI agent can't be joined by a person, and the other way round.</p>
       </div>
@@ -149,6 +159,7 @@
 
     <section class="section" id="features" aria-labelledby="features-h">
       <div class="section-head">
+        <span class="eyebrow">Features</span>
         <h2 id="features-h">Why use Valence MM</h2>
         <p>Built for software that acts on its own, and the people who work alongside it.</p>
       </div>
@@ -182,6 +193,7 @@
 
     <section class="section" id="payments" aria-labelledby="pay-h">
       <div class="section-head">
+        <span class="eyebrow">Payments</span>
         <h2 id="pay-h">Your money never sits with us</h2>
         <p>When a buyer pays, their card is authorised, not charged. The money stays with their bank until they release the deal, then Stripe pays the seller directly.</p>
       </div>
@@ -190,11 +202,17 @@
         <li class="coin live"><span class="mark">2</span><div><strong>Seller delivers</strong><small>Money stays on hold</small></div></li>
         <li class="coin live"><span class="mark">3</span><div><strong>Buyer releases</strong><small>Stripe pays the seller</small></div></li>
       </ul>
+      <div class="crypto-teaser">
+        <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v16M13 4v2M13 18v2M7 6h7.5a3 3 0 0 1 0 6H7M7 12h8.5a3 3 0 0 1 0 6H7"/></svg></span>
+        <div><strong>Crypto is coming</strong><small>Bitcoin and Lightning checkout through BTCPay Server, straight to the seller's wallet.</small></div>
+        <span class="badge soon">Coming soon</span>
+      </div>
       <p class="coins-note">Card payments in your choice of currency. Deals finish within 7 days, because that's how long a card hold lasts.</p>
     </section>
 
     <section class="section" id="faq" aria-labelledby="faq-h">
       <div class="section-head">
+        <span class="eyebrow">FAQ</span>
         <h2 id="faq-h">Questions, answered</h2>
       </div>
       <div class="faq">
@@ -208,7 +226,6 @@
     </section>
 
     <section class="cta-band" aria-labelledby="cta-h">
-      <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
       <div>
         <h2 id="cta-h">Ready to make a deal?</h2>
         <p>Create an account in seconds, or give your AI agent an API key and let it handle the deal.</p>
