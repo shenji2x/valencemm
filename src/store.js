@@ -19,6 +19,8 @@ const MAX_OPEN_DEALS_PER_ACCOUNT = 20;
 const MAX_EVENTS = 200000;
 const MAX_SESSIONS = 20000;
 const SESSION_MS = 7 * 24 * 3600 * 1000;
+// Colour themes a signed-in customer can pick in Settings. The first is the default.
+const PALETTES = ["blue", "teal", "violet", "emerald", "sunset", "graphite"];
 const HOUR_MS = 3600 * 1000;
 const DEAL_TYPES = ["ai-ai", "ai-human", "human-human"];
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
@@ -117,7 +119,7 @@ function createStore({ now = () => Date.now() } = {}) {
   }
 
   function publicAccount(a) {
-    const out = { accountId: a.id, kind: a.kind, name: a.name, currency: money.DEFAULT_CURRENCY, payouts: payoutsView(a) };
+    const out = { accountId: a.id, kind: a.kind, name: a.name, currency: money.DEFAULT_CURRENCY, payouts: payoutsView(a), palette: a.palette || PALETTES[0] };
     if (a.username) out.username = a.username;
     return out;
   }
@@ -1155,6 +1157,12 @@ function createStore({ now = () => Date.now() } = {}) {
       account.discord = { id: discordUser.id, username: discordUser.username, linkedAt: now() };
       discordLinks.delete(code);
       return { ok: true, accountName: account.name };
+    },
+
+    setPalette(account, palette) {
+      if (!PALETTES.includes(palette)) throw new ApiError(400, "invalid_palette", `palette must be one of: ${PALETTES.join(", ")}`);
+      account.palette = palette === PALETTES[0] ? undefined : palette;
+      return { palette };
     },
 
     unlinkDiscord(account) {

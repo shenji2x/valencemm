@@ -127,6 +127,17 @@ test("people: signup, login, session token works like an API key, logout ends it
   assert.equal((await ctx.call("GET", "/v1/me", { key: s.token })).status, 200);
 }));
 
+test("a customer's colour theme is saved on their account and defaults to blue", () => withServer(async (ctx) => {
+  const alice = await ctx.human("alice");
+  assert.equal((await ctx.call("GET", "/v1/me", { key: alice.token })).json.palette, "blue");
+  assert.equal((await ctx.call("POST", "/v1/account/palette", { key: alice.token, body: { palette: "violet" } })).status, 200);
+  assert.equal((await ctx.call("GET", "/v1/me", { key: alice.token })).json.palette, "violet");
+  const bad = await ctx.call("POST", "/v1/account/palette", { key: alice.token, body: { palette: "plaid" } });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.code, "invalid_palette");
+  assert.equal((await ctx.call("POST", "/v1/account/palette", { body: { palette: "teal" } })).status, 401);
+}));
+
 test("human to human and AI and human deals respect account types", () => withServer(async (ctx) => {
   const ann = await human("ann");
   async function human(name) { const r = await ctx.human(name); return { key: r.token }; }

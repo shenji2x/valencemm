@@ -81,6 +81,8 @@
     wallet: "M3 7h18v12H3zM3 7l3-4h12l3 4M16 13h2",
     check: "M5 12l5 5 9-10",
     clock: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2",
+    bitcoin: "M9 4v16M13 4v2M13 18v2M7 6h7.5a3 3 0 0 1 0 6H7M7 12h8.5a3 3 0 0 1 0 6H7",
+    bolt: "M13 2L4 14h7l-1 8 9-12h-7z",
     coins: "M8 8a5 3 0 1 0 0-.01M3 8v4c0 1.7 2.2 3 5 3s5-1.3 5-3V8M11 14c0 1.7 2.2 3 5 3s5-1.3 5-3v-4c0-1.7-2.2-3-5-3",
     arrowUp: "M12 19V5M5 12l7-7 7 7",
     arrowDown: "M12 5v14M5 12l7 7 7-7",
@@ -154,9 +156,36 @@
   const kindLabel = (kind) => (kind === "agent" ? "AI agent" : "person");
 
   // ---------- session and API ----------
-  const getToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } };
-  const setToken = (t) => {
-    try { if (t) sessionStorage.setItem(TOKEN_KEY, t); else sessionStorage.removeItem(TOKEN_KEY); } catch { /* storage blocked */ }
+  // A normal sign-in lives in this tab only. "Remember me" keeps it in localStorage for 7 days,
+  // the same lifetime the server gives every session.
+  const REMEMBER_UNTIL_KEY = "valence_token_until";
+  const REMEMBER_MS = 7 * 24 * 3600 * 1000;
+  const getToken = () => {
+    try {
+      const t = sessionStorage.getItem(TOKEN_KEY);
+      if (t) return t;
+      const until = Number(localStorage.getItem(REMEMBER_UNTIL_KEY));
+      if (until > Date.now()) return localStorage.getItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REMEMBER_UNTIL_KEY);
+    } catch { /* storage blocked */ }
+    return null;
+  };
+  const setToken = (t, remember = false) => {
+    try {
+      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(REMEMBER_UNTIL_KEY);
+      if (!t) {
+        localStorage.removeItem(PALETTE_KEY);
+        document.documentElement.removeAttribute("data-palette");
+      } else if (remember) {
+        localStorage.setItem(TOKEN_KEY, t);
+        localStorage.setItem(REMEMBER_UNTIL_KEY, String(Date.now() + REMEMBER_MS));
+      } else {
+        sessionStorage.setItem(TOKEN_KEY, t);
+      }
+    } catch { /* storage blocked */ }
   };
   function goLogin() {
     location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash);
@@ -374,6 +403,23 @@
 
   // ---------- theme ----------
   const THEME_KEY = "valence_theme";
+  // A signed-in customer's colour theme. theme.js applies the cached copy before paint, and only
+  // while someone is signed in; the account holds the real choice so it follows them across devices.
+  const PALETTE_KEY = "valence_palette";
+  const PALETTES = [
+    ["blue", "Ocean blue", "The default"],
+    ["teal", "Lagoon", "Teal and cyan"],
+    ["violet", "Amethyst", "Violet and indigo"],
+    ["emerald", "Emerald", "Fresh greens"],
+    ["sunset", "Sunset", "Amber and rose"],
+    ["graphite", "Graphite", "Quiet greys"],
+  ];
+  function applyPalette(palette) {
+    const p = PALETTES.some(([k]) => k === palette) && palette !== "blue" ? palette : null;
+    if (p) document.documentElement.setAttribute("data-palette", p);
+    else document.documentElement.removeAttribute("data-palette");
+    try { if (p) localStorage.setItem(PALETTE_KEY, p); else localStorage.removeItem(PALETTE_KEY); } catch { /* storage blocked */ }
+  }
   const THEME_COLORS = { dark: "#060a16", light: "#f5f8ff" };
   function systemTheme() {
     return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
@@ -465,7 +511,11 @@
     for (const a of document.querySelectorAll("a[data-keep-next]")) {
       if (next !== "/dashboard") a.href = a.getAttribute("href") + "?next=" + encodeURIComponent(next);
     }
-    return (token) => { setToken(token); location.href = next; };
+    return (token) => {
+      const box = $("#remember");
+      setToken(token, !!(box && box.checked));
+      location.href = next;
+    };
   }
   function signupPage() {
     const done = authDone();
@@ -594,6 +644,7 @@
 
   async function refreshMe() {
     app.me = await api("GET", "/me");
+    applyPalette(app.me.palette);
     return app.me;
   }
   function setCounts(deals) {
@@ -659,6 +710,7 @@
     av.textContent = me.name.slice(0, 1);
     if (me.kind === "agent") av.classList.add("agent");
     $("#logout").addEventListener("click", logout);
+    $("#top-logout").addEventListener("click", logout);
     try {
       const n = sessionStorage.getItem("valence_notice");
       if (n) { sessionStorage.removeItem("valence_notice"); setTimeout(() => toast(n), 600); }
@@ -1261,6 +1313,7 @@
 
     // True while the buyer has the card form open, so a poll can't tear it down under them.
     let paying = false;
+    let payMethod = "card";
 
     async function ask(action, promptText, okText, extra = {}) {
       const answer = promptText ? prompt(promptText) : "";
@@ -1335,6 +1388,16 @@
             el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`),
             breakdown(q));
           if (!paying) {
+            const methods = el("div", { class: "seg", role: "group", "aria-label": "Pay with" });
+            for (const [k, l] of [["card", "Card"], ["crypto", "Crypto"]]) {
+              put(methods, el("button", { type: "button", "aria-pressed": String(payMethod === k), onclick: () => { payMethod = k; draw(); } }, l));
+            }
+            put(p, el("div", { class: "pay-with" }, el("span", {}, "Pay with"), methods));
+          }
+          if (!paying && payMethod === "crypto") {
+            put(p, cryptoPanel(),
+              el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+          } else if (!paying) {
             put(p, el("div", { class: "actions" },
               el("button", { type: "button", class: "btn", onclick: () => { paying = true; draw(); } }, `Pay ${fmt(q.buyerTotal, q.currency)}`),
               confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
@@ -1548,6 +1611,7 @@
     const [history, payouts] = await Promise.all([api("GET", "/payments"), api("GET", "/payouts")]);
     if (!alive(gen)) return;
     put(view, payoutsCard(payouts));
+    put(view, el("section", { class: "card" }, cryptoPanel()));
     if (!history.events.length) {
       put(view, el("section", { class: "card" },
         emptyState("Nothing here yet", "Once a deal is funded, every movement shows up here with the deal it belongs to.",
@@ -1570,6 +1634,27 @@
           el("td", { class: "num" + (e.direction === "in" ? " in" : e.direction === "out" ? " out" : "") },
             e.amount == null ? "\u2014" : `${e.direction === "out" ? "\u2212" : e.direction === "in" ? "+" : ""}${fmt(e.amount, e.currency || history.currency)}`)))))),
       el("p", { class: "dim" }, "These are completed movements, past tense. Valence holds no balance for you: every payment belongs to one deal."));
+  }
+
+  // Crypto checkout is planned through BTCPay Server. Until it's wired up this is a preview only:
+  // nothing here talks to the server or a wallet.
+  function cryptoPanel() {
+    const coin = (iconName, tone, name, sub) => el("li", { class: "tone-" + tone },
+      el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("strong", {}, name), el("small", {}, sub)));
+    return el("div", { class: "crypto" },
+      el("div", { class: "crypto-head" },
+        el("div", {}, el("strong", {}, "Pay with crypto"), el("p", { class: "muted" }, "Checkout will run through BTCPay Server, so payments go straight to a wallet, with no exchange in the middle.")),
+        el("span", { class: "badge soon" }, "Coming soon")),
+      el("ul", { class: "crypto-coins" },
+        coin("bitcoin", "sunset", "Bitcoin", "On-chain"),
+        coin("bolt", "violet", "Lightning", "Instant, low fees")),
+      el("div", { class: "crypto-invoice", "aria-hidden": "true" },
+        el("div", { class: "qr-ph" }),
+        el("div", { class: "grow" },
+          el("span", { class: "ph-line w60" }), el("span", { class: "ph-line w90" }), el("span", { class: "ph-line w40" }))),
+      el("div", { class: "actions" },
+        el("button", { type: "button", class: "btn", disabled: true }, icon("bitcoin"), "Pay with crypto")),
+      el("p", { class: "dim" }, "Crypto isn't switched on yet. Choose Card to fund this deal today."));
   }
 
   // Shown on the payments page and in settings.
@@ -2067,6 +2152,30 @@
       } }, l));
     }
 
+    const swatches = el("div", { class: "palettes", role: "radiogroup", "aria-label": "Colour theme" });
+    const current = me.palette || "blue";
+    for (const [key, name, sub] of PALETTES) {
+      const b = el("button", { type: "button", class: "palette", role: "radio", "data-palette-preview": key, "aria-checked": String(key === current) },
+        el("span", { class: "palette-preview", "aria-hidden": "true" },
+          el("span", { class: "pp-bar" }), el("span", { class: "pp-side" }),
+          el("span", { class: "pp-card" }, el("i"), el("i"), el("i"))),
+        el("span", { class: "palette-name" }, name), el("span", { class: "palette-sub" }, sub));
+      b.addEventListener("click", async () => {
+        const before = document.documentElement.getAttribute("data-palette") || "blue";
+        applyPalette(key);
+        for (const x of swatches.children) x.setAttribute("aria-checked", String(x === b));
+        try {
+          await api("POST", "/account/palette", { palette: key }, { noRedirect: true });
+          app.me.palette = key;
+        } catch (err) {
+          applyPalette(before);
+          for (const x of swatches.children) x.setAttribute("aria-checked", String(x.getAttribute("data-palette-preview") === before));
+          toast(err.message);
+        }
+      });
+      put(swatches, b);
+    }
+
     put(view,
       el("section", { class: "card" },
         el("h2", {}, "Profile"),
@@ -2076,7 +2185,11 @@
         el("div", { class: "set-row" }, el("span", {}, "Currency"), el("strong", {}, "Set per deal"))),
       el("section", { class: "card" },
         el("h2", {}, "Appearance"),
-        el("div", { class: "set-row" }, el("span", {}, "Theme"), seg)));
+        el("div", { class: "set-row" }, el("span", {}, "Mode"), seg),
+        el("div", { class: "set-stack" },
+          el("span", {}, "Colour theme"),
+          el("p", { class: "hint" }, "Changes the site's colours for you while you're signed in. Saved to your account."),
+          swatches)));
 
     try {
       put(view, payoutsCard(await api("GET", "/payouts")));
@@ -2104,7 +2217,7 @@
     }
 
     put(view, el("section", { class: "card" }, el("h2", {}, "Sign out"),
-      el("p", { class: "muted" }, "Sign out of this browser tab."),
+      el("p", { class: "muted" }, "Sign out of Valence on this browser."),
       el("button", { type: "button", class: "btn secondary", onclick: logout }, "Log out")));
   }
 

@@ -348,6 +348,7 @@ function createApi(store, opts = {}) {
     return { body: { ...store.startDiscordLink(account), invite: opts.discordInvite || DEFAULT_INVITE } };
   });
   add("POST", "/account/discord/unlink", { auth: true }, ({ account }) => ({ body: store.unlinkDiscord(account) }));
+  add("POST", "/account/palette", { auth: true }, ({ account, body }) => ({ body: store.setPalette(account, body.palette) }));
 
   handleApiRef.support = support;
   handleApiRef.discord = discord;
