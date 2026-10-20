@@ -374,7 +374,7 @@
 
   // ---------- theme ----------
   const THEME_KEY = "valence_theme";
-  const THEME_COLORS = { dark: "#05070d", light: "#f5f7fc" };
+  const THEME_COLORS = { dark: "#060a16", light: "#f5f8ff" };
   function systemTheme() {
     return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   }
@@ -421,17 +421,10 @@
     }
   }
 
-  // The glowing columns rise on load, then drift slowly. One orchestrated moment.
+  // The preview chart draws itself on load, and the steps rule fills as you scroll.
   function heroMotion() {
     const gsap = window.gsap;
     if (!gsap || reducedMotion()) return;
-    for (const group of document.querySelectorAll(".bars")) {
-      const bars = group.querySelectorAll("i");
-      gsap.from(bars, { scaleY: 0, duration: 1.2, ease: "power3.out", stagger: { each: 0.04, from: "random" } });
-      bars.forEach((b) => {
-        gsap.to(b, { scaleY: () => 0.75 + Math.random() * 0.5, duration: () => 3 + Math.random() * 3, ease: "sine.inOut", repeat: -1, yoyo: true, delay: 1.2 + Math.random() });
-      });
-    }
     const line = $("#mock-line");
     if (line && line.getTotalLength) {
       const len = line.getTotalLength();
@@ -441,6 +434,12 @@
     const fill = $("#steps-fill");
     if (fill && window.ScrollTrigger) {
       gsap.fromTo(fill, { scaleX: 0 }, { scaleX: 1, ease: "none", scrollTrigger: { trigger: ".steps-wrap", start: "top 85%", end: "bottom 55%", scrub: 0.6 } });
+    }
+    // cards rise into place as each section scrolls in
+    if (window.ScrollTrigger) {
+      for (const group of document.querySelectorAll(".types, .features, .coins")) {
+        gsap.from(group.children, { y: 24, opacity: 0, duration: 0.7, ease: "power3.out", stagger: 0.06, scrollTrigger: { trigger: group, start: "top 85%", once: true } });
+      }
     }
   }
 
@@ -698,7 +697,7 @@
     const light = document.documentElement.getAttribute("data-theme") === "light";
     return {
       theme: light ? "stripe" : "night",
-      variables: { colorPrimary: "#4c8dff", borderRadius: "10px", fontFamily: "Roboto, system-ui, sans-serif" },
+      variables: { colorPrimary: light ? "#2563eb" : "#5b93ff", borderRadius: "10px", fontFamily: "\"IBM Plex Sans\", system-ui, sans-serif" },
     };
   }
 
@@ -805,8 +804,9 @@
   }
 
   // ---------- shared pieces ----------
-  function tile(iconName, value, label, accent) {
-    return el("div", { class: "tile" + (accent ? " accent" : "") }, el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("b", { class: "num" }, value), el("span", {}, label)));
+  // tone: blue, sky, cyan, indigo, violet or teal, so a row of tiles reads as a family of blues
+  function tile(iconName, value, label, tone = "blue") {
+    return el("div", { class: "tile tone-" + tone }, el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("b", { class: "num" }, value), el("span", {}, label)));
   }
   function roleText(d) {
     return d.yourRole === "buyer" ? "you're paying" : "you're getting paid";
@@ -854,13 +854,16 @@
       const attention = active.filter(needsMe);
       const waiting = active.filter((d) => !needsMe(d));
       put(box,
-        el("h2", {}, `Welcome back, ${me.name}`),
-        el("p", { class: "muted" }, attention.length ? `${attention.length} deal${attention.length > 1 ? "s" : ""} need${attention.length > 1 ? "" : "s"} you.` : "Here's how your deals are going."),
+        el("section", { class: "welcome" },
+          el("div", {},
+            el("h2", {}, `Welcome back, ${me.name}`),
+            el("p", {}, attention.length ? `${attention.length} deal${attention.length > 1 ? "s" : ""} need${attention.length > 1 ? "" : "s"} you.` : "Here's how your deals are going.")),
+          el("div", { class: "row" }, btnLink("#new", "New deal"), btnLink("#join", "Join a deal", "secondary"))),
         el("div", { class: "tiles" },
-          tile("wallet", fmt(stats.volume.onHold, stats.currency), "Held right now", true),
-          tile("deals", String(active.length), "Active deals"),
-          tile("check", String(stats.counts.released), "Completed deals"),
-          tile("coins", fmt(stats.volume.total, stats.currency), "Volume")),
+          tile("wallet", fmt(stats.volume.onHold, stats.currency), "Held right now", "blue"),
+          tile("deals", String(active.length), "Active deals", "sky"),
+          tile("check", String(stats.counts.released), "Completed deals", "teal"),
+          tile("coins", fmt(stats.volume.total, stats.currency), "Volume", "indigo")),
         el("div", { class: "two" },
           el("section", { class: "card" },
             el("h2", {}, "Needs you"),
@@ -870,12 +873,14 @@
             waiting.length ? el("ul", { class: "list" }, waiting.slice(0, 5).map(dealItem)) : null),
           el("section", { class: "card" },
             el("h2", {}, "Recent activity"),
-            me.recentLedger.length
-              ? el("ul", { class: "list" }, me.recentLedger.slice(0, 8).map((e) => el("li", {}, el("div", { class: "item" },
-                el("span", { class: "page-ico" }, icon(e.delta >= 0 ? "arrowDown" : "arrowUp")),
-                el("div", { class: "grow" }, el("span", { class: "t" }, e.memo), el("span", { class: "s" }, ago(e.at))),
-                el("span", { class: "amt num" }, `${e.delta > 0 ? "+" : ""}${fmt(e.delta)}`)))))
-              : el("p", { class: "muted" }, "No activity yet."))));
+            (me.recentPayments || []).length
+              ? el("ul", { class: "list" }, me.recentPayments.slice(0, 8).map((e) => el("li", {}, el("div", { class: "item" },
+                el("span", { class: "page-ico tone-" + (e.direction === "in" ? "teal" : e.direction === "out" ? "sky" : "indigo") },
+                  icon(e.direction === "out" ? "arrowUp" : e.direction === "in" ? "arrowDown" : "clock")),
+                el("div", { class: "grow" }, el("span", { class: "t" }, PAYMENT_LABELS[e.event] || e.event), el("span", { class: "s" }, ago(e.at))),
+                e.amount == null ? null : el("span", { class: "amt num" + (e.direction === "in" ? " in" : "") },
+                  `${e.direction === "out" ? "\u2212" : e.direction === "in" ? "+" : ""}${fmt(e.amount, e.currency || stats.currency)}`)))))
+              : el("p", { class: "muted" }, "No activity yet. Payments show up here once a deal is funded."))));
     }
     draw(deals, stats, me);
     let last = JSON.stringify([deals, stats]);
@@ -897,6 +902,8 @@
     const slot = plotW / daily.length;
     const bw = Math.max(2, slot - 2); // 2px gap between bars
     const chart = svg("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Released volume per day for the last 30 days" });
+    put(chart, svg("defs", {}, svg("linearGradient", { id: "bar-fill", x1: 0, y1: 0, x2: 0, y2: 1 },
+      svg("stop", { offset: "0%", class: "b1" }), svg("stop", { offset: "100%", class: "b2" }))));
     for (let i = 0; i <= 4; i++) {
       const y = T + plotH - (plotH * i) / 4;
       put(chart, svg("line", { class: "gridline", x1: L, x2: W, y1: y, y2: y }));
@@ -936,12 +943,12 @@
     const maxCount = Math.max(1, ...states.map((k) => s.counts[k]));
     put(view,
       el("div", { class: "tiles" },
-        tile("coins", fmt(s.volume.total, s.currency), "Total volume", true),
-        tile("arrowUp", fmt(s.volume.sent), "Sent"),
-        tile("arrowDown", fmt(s.volume.received), "Received"),
-        tile("clock", duration(s.durationMs.avgFundedToReleased), "Avg time held"),
-        tile("percent", pct, "Completion rate"),
-        tile("wallet", fmt(s.volume.onHold, s.currency), "Held right now")),
+        tile("coins", fmt(s.volume.total, s.currency), "Total volume", "blue"),
+        tile("arrowUp", fmt(s.volume.sent), "Sent", "sky"),
+        tile("arrowDown", fmt(s.volume.received), "Received", "teal"),
+        tile("clock", duration(s.durationMs.avgFundedToReleased), "Avg time held", "cyan"),
+        tile("percent", pct, "Completion rate", "indigo"),
+        tile("wallet", fmt(s.volume.onHold, s.currency), "Held right now", "violet")),
       el("section", { class: "card" },
         el("div", { class: "row between" }, el("h2", {}, "Released volume, last 30 days"), el("span", { class: "dim" }, "Hover a bar for the day's total")),
         s.daily.some((d) => d.volume > 0) ? barChart(s.daily) : el("p", { class: "muted" }, "No released deals in the last 30 days yet. Once deals complete, their volume shows up here day by day.")),
@@ -1523,23 +1530,23 @@
   }
 
   // ---------- payments: what has moved, never what is "available" ----------
+  const PAYMENT_LABELS = {
+    payment_started: "Payment started",
+    funds_held: "Payment held",
+    payment_failed: "Payment failed",
+    released: "Released to the seller",
+    paid_out: "Paid out to you",
+    hold_released: "Hold released",
+    refunded: "Refunded",
+    delivered: "Marked delivered",
+    dispute_opened: "Dispute opened",
+    chargeback: "Chargeback",
+    payouts_started: "Payout setup started",
+    payouts_ready: "Payouts ready",
+  };
   async function viewPayments(view, _arg, gen) {
     const [history, payouts] = await Promise.all([api("GET", "/payments"), api("GET", "/payouts")]);
     if (!alive(gen)) return;
-    const LABELS = {
-      payment_started: "Payment started",
-      funds_held: "Payment held",
-      payment_failed: "Payment failed",
-      released: "Released to the seller",
-      paid_out: "Paid out to you",
-      hold_released: "Hold released",
-      refunded: "Refunded",
-      delivered: "Marked delivered",
-      dispute_opened: "Dispute opened",
-      chargeback: "Chargeback",
-      payouts_started: "Payout setup started",
-      payouts_ready: "Payouts ready",
-    };
     put(view, payoutsCard(payouts));
     if (!history.events.length) {
       put(view, el("section", { class: "card" },
@@ -1558,7 +1565,7 @@
         el("thead", {}, el("tr", {}, el("th", {}, "When"), el("th", {}, "What"), el("th", {}, "Deal"), el("th", { class: "num" }, "Amount"))),
         el("tbody", {}, history.events.map((e) => el("tr", {},
           el("td", {}, when(e.at)),
-          el("td", {}, LABELS[e.event] || e.event, e.detail ? el("span", { class: "s" }, e.detail) : null),
+          el("td", {}, PAYMENT_LABELS[e.event] || e.event, e.detail ? el("span", { class: "s" }, e.detail) : null),
           el("td", {}, e.dealId ? el("a", { href: "#deal/" + encodeURIComponent(e.dealId) }, e.dealId.slice(0, 12)) : "\u2014"),
           el("td", { class: "num" + (e.direction === "in" ? " in" : e.direction === "out" ? " out" : "") },
             e.amount == null ? "\u2014" : `${e.direction === "out" ? "\u2212" : e.direction === "in" ? "+" : ""}${fmt(e.amount, e.currency || history.currency)}`)))))),
@@ -1938,7 +1945,7 @@
       const on = s.twoFactor.app;
       const row = el("div", { class: "tfa-row" },
         el("div", { class: "tfa-head" },
-          el("span", { class: "page-ico" }, icon("phone")),
+          el("span", { class: "page-ico tone-sky" }, icon("phone")),
           el("div", { class: "grow" }, el("strong", {}, "Authenticator app"),
             el("p", { class: "muted" }, "Get a new 6-digit code every 30 seconds from an app on your phone. We suggest Google Authenticator; Microsoft Authenticator, Authy and 1Password work too.")),
           badge(on)),
@@ -1985,7 +1992,7 @@
       const can = s.emailAvailable && s.emailVerified;
       const row = el("div", { class: "tfa-row" },
         el("div", { class: "tfa-head" },
-          el("span", { class: "page-ico" }, icon("mail")),
+          el("span", { class: "page-ico tone-cyan" }, icon("mail")),
           el("div", { class: "grow" }, el("strong", {}, "Email codes"),
             el("p", { class: "muted" }, can ? `When you log in, we email a 6-digit code to ${s.email}.` : "Verify an email address above to use this.")),
           badge(on)),
@@ -2003,7 +2010,7 @@
       const left = s.twoFactor.recoveryCodesLeft;
       const row = el("div", { class: "tfa-row" },
         el("div", { class: "tfa-head" },
-          el("span", { class: "page-ico" }, icon("key")),
+          el("span", { class: "page-ico tone-indigo" }, icon("key")),
           el("div", { class: "grow" }, el("strong", {}, "Recovery codes"),
             el("p", { class: "muted" }, `${left} of 10 left. Use one to log in if you lose your phone or can't get to your email.`)),
           el("span", { class: "badge " + (left > 3 ? "ok" : "funded") }, `${left} left`)),

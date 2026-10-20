@@ -405,10 +405,10 @@ test("vendored GSAP, Lenis and self-hosted fonts are served from our own origin"
     assert.equal(r.status, 200, path);
     assert.match(r.headers.get("content-type"), /javascript/, path);
   }
-  for (const path of ["/fonts/roboto-400.woff", "/fonts/roboto-700.woff", "/fonts/jetbrains-mono-500.woff"]) {
+  for (const path of ["/fonts/ibm-plex-sans-400.woff2", "/fonts/ibm-plex-sans-700.woff2", "/fonts/jetbrains-mono-500.woff"]) {
     const r = await ctx.call("GET", path);
     assert.equal(r.status, 200, path);
-    assert.match(r.headers.get("content-type"), /font\/woff/, path);
+    assert.match(r.headers.get("content-type"), /font\/woff2?/, path);
   }
   assert.match((await ctx.call("GET", "/")).headers.get("content-security-policy"), /font-src 'self'/);
   // subfolder pages are not exposed without their extension, and folders aren't listed

@@ -43,8 +43,8 @@ function transcriptHtml(data, { embedded = new Map(), siteUrl = "https://valence
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ticket #${data.number} transcript | Valence MM</title>
 <style>
-  :root { color-scheme: light dark; --bg:#f5f7fc; --card:#fff; --ink:#0a1222; --muted:#4b5872; --line:#e2e8f2; --accent:#1f5eff; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#05070d; --card:#0b1019; --ink:#f1f5fc; --muted:#98a4bb; --line:#182133; --accent:#7aabff; } }
+  :root { color-scheme: light dark; --bg:#f5f8ff; --card:#fff; --ink:#0a1430; --muted:#44516d; --line:#e0e7f5; --accent:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#060a16; --card:#0d1427; --ink:#edf2ff; --muted:#a6b3d0; --line:#1b2643; --accent:#8fb5ff; } }
   body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 -apple-system,Segoe UI,Roboto,Arial,sans-serif; }
   .wrap { max-width:760px; margin:0 auto; padding:32px 20px 60px; }
   h1 { font-size:1.6rem; margin:0 0 4px; letter-spacing:-.02em; }
