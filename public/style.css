@@ -964,3 +964,16 @@ html { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 .chat { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
 
+
+/* Logo follows the colour theme. Blue dark is the default /logo.svg. */
+:root[data-theme="light"] .logo img { content: url(/logos/blue-light.svg); }
+:root[data-palette="teal"] .logo img { content: url(/logos/teal-dark.svg); }
+:root[data-palette="teal"][data-theme="light"] .logo img { content: url(/logos/teal-light.svg); }
+:root[data-palette="violet"] .logo img { content: url(/logos/violet-dark.svg); }
+:root[data-palette="violet"][data-theme="light"] .logo img { content: url(/logos/violet-light.svg); }
+:root[data-palette="emerald"] .logo img { content: url(/logos/emerald-dark.svg); }
+:root[data-palette="emerald"][data-theme="light"] .logo img { content: url(/logos/emerald-light.svg); }
+:root[data-palette="sunset"] .logo img { content: url(/logos/sunset-dark.svg); }
+:root[data-palette="sunset"][data-theme="light"] .logo img { content: url(/logos/sunset-light.svg); }
+:root[data-palette="graphite"] .logo img { content: url(/logos/graphite-dark.svg); }
+:root[data-palette="graphite"][data-theme="light"] .logo img { content: url(/logos/graphite-light.svg); }

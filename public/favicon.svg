@@ -1,8 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="v" x1="14" y1="0" x2="50" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#22d3ee"/><stop offset=".5" stop-color="#3b6dff"/><stop offset="1" stop-color="#b18cff"/></linearGradient>
+    <linearGradient id="o" x1="4" y1="0" x2="60" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#8b93ff"/></linearGradient>
+    <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M8 33A24 9 0 0 0 56 33" transform="rotate(-24 32 33)" fill="none" stroke="#000" stroke-width="10"/>
+    </mask>
+  </defs>
   <rect width="64" height="64" rx="14" fill="#0b1430"/>
-  <path d="M17 20 L32 44 L47 20" fill="none" stroke="#3b82f6" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="11" y="14" width="12" height="12" rx="3" fill="#22d3ee"/>
-  <circle cx="47" cy="20" r="6.5" fill="#818cf8"/>
-  <circle cx="32" cy="44" r="8" fill="#3b82f6"/>
-  <circle cx="32" cy="44" r="3" fill="#0b1430"/>
+  <path d="M8 33A24 9 0 0 1 56 33" transform="rotate(-24 32 33)" fill="none" stroke="url(#o)" stroke-width="4" opacity=".45"/>
+  <path d="M18 16L32 46L46 16" fill="none" stroke="url(#v)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" mask="url(#gap)"/>
+  <path d="M8 33A24 9 0 0 0 56 33" transform="rotate(-24 32 33)" fill="none" stroke="url(#o)" stroke-width="4"/>
+  <circle cx="14.5" cy="45" r="4.6" fill="#22d3ee"/>
 </svg>
