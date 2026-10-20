@@ -484,9 +484,198 @@
     // cards rise into place as each section scrolls in
     if (window.ScrollTrigger) {
       for (const group of document.querySelectorAll(".types, .features, .coins")) {
-        gsap.from(group.children, { y: 24, opacity: 0, duration: 0.7, ease: "power3.out", stagger: 0.06, scrollTrigger: { trigger: group, start: "top 85%", once: true } });
+        gsap.from(group.children, { y: 24, opacity: 0, duration: 0.7, ease: "power3.out", stagger: 0.06, clearProps: "transform,opacity", scrollTrigger: { trigger: group, start: "top 85%", once: true } });
       }
     }
+  }
+
+  // ---------- interface motion: tilt cards, dropdowns, details ----------
+  const TILT_CARDS = ".type, .features article, .coin, .tile, .hero-stats > div, .crypto-coins li";
+
+  // Square-ish cards lean toward the pointer. Mouse and pen only, and never with reduced motion.
+  function setupTilt() {
+    if (reducedMotion() || !window.matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+    let frame = 0;
+    const arm = (card) => {
+      card.dataset.tilt = "1";
+      card.classList.add("tilt");
+      card.append(el("span", { class: "tilt-glare", "aria-hidden": "true" }));
+      card.addEventListener("pointermove", (e) => {
+        const r = card.getBoundingClientRect();
+        const x = (e.clientX - r.left) / r.width;
+        const y = (e.clientY - r.top) / r.height;
+        const max = Math.min(9, 2600 / Math.max(r.width, 1));
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => {
+          const st = card.style;
+          st.setProperty("--rx", ((0.5 - y) * max).toFixed(2) + "deg");
+          st.setProperty("--ry", ((x - 0.5) * max).toFixed(2) + "deg");
+          st.setProperty("--px", ((x - 0.5) * 2).toFixed(3));
+          st.setProperty("--py", ((y - 0.5) * 2).toFixed(3));
+          st.setProperty("--mx", (x * 100).toFixed(1) + "%");
+          st.setProperty("--my", (y * 100).toFixed(1) + "%");
+          card.classList.add("tilting");
+        });
+      });
+      card.addEventListener("pointerleave", () => {
+        cancelAnimationFrame(frame);
+        card.classList.remove("tilting");
+        for (const k of ["--rx", "--ry", "--px", "--py"]) card.style.removeProperty(k);
+      });
+    };
+    document.addEventListener("pointerover", (e) => {
+      const card = e.target.closest && e.target.closest(TILT_CARDS);
+      if (card && !card.dataset.tilt) arm(card);
+    });
+  }
+
+  // <details> open and close with a height animation; the header menu drops in and fades out.
+  function setupDetails() {
+    document.addEventListener("click", (e) => {
+      const summary = e.target.closest && e.target.closest("summary");
+      const d = summary && summary.parentElement;
+      if (!d || d.tagName !== "DETAILS" || reducedMotion()) return;
+      e.preventDefault();
+      if (d.classList.contains("menu")) return toggleMenu(d, !d.open);
+      const opening = !d.open || d._closing;
+      if (d._anim) d._anim.cancel();
+      d._closing = false;
+      const closed = summary.offsetHeight + "px";
+      d.style.overflow = "hidden";
+      if (opening) {
+        d.open = true;
+        d._anim = d.animate({ height: [closed, d.offsetHeight + "px"] }, { duration: 320, easing: "cubic-bezier(.2,.7,.2,1)" });
+        for (const kid of d.children) if (kid !== summary) kid.animate({ opacity: [0, 1], transform: ["translateY(-4px)", "none"] }, { duration: 320, delay: 60, easing: "ease-out", fill: "backwards" });
+      } else {
+        d._closing = true;
+        d._anim = d.animate({ height: [d.offsetHeight + "px", closed] }, { duration: 240, easing: "cubic-bezier(.4,0,.2,1)" });
+      }
+      d._anim.addEventListener("finish", () => {
+        if (d._closing) { d.open = false; d._closing = false; }
+        d.style.overflow = ""; d._anim = null;
+      });
+    });
+    document.addEventListener("click", (e) => {
+      for (const m of document.querySelectorAll("details.menu[open]")) if (!m.contains(e.target)) toggleMenu(m, false);
+    });
+  }
+  function toggleMenu(d, open) {
+    clearTimeout(d._t);
+    if (open) { d.classList.remove("closing"); d.open = true; return; }
+    if (reducedMotion()) { d.open = false; return; }
+    d.classList.add("closing");
+    d._t = setTimeout(() => { d.open = false; d.classList.remove("closing"); }, 200);
+  }
+
+  // Every <select> gets a styled button and an animated list. The real select stays in the form,
+  // keeps its id for the label, and still fires "change", so form code doesn't know the difference.
+  const CHEVRON = "M6 9l6 6 6-6";
+  let ddSeq = 0;
+  function enhanceSelect(sel) {
+    if (sel.dataset.dd || sel.multiple || sel.size > 1) return;
+    sel.dataset.dd = "1";
+    const n = ++ddSeq;
+    const label = sel.id ? document.querySelector(`label[for="${CSS.escape(sel.id)}"]`) : null;
+    if (label && !label.id) label.id = `dd-label-${n}`;
+    const text = el("span");
+    const chev = svg("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" }, svg("path", { d: CHEVRON }));
+    const btn = el("button", { type: "button", class: "dd-btn", id: `dd-btn-${n}`, "aria-haspopup": "listbox", "aria-expanded": "false", "aria-controls": `dd-list-${n}`,
+      "aria-labelledby": label ? `${label.id} dd-btn-${n}` : null }, text, chev);
+    const list = el("ul", { class: "dd-list", id: `dd-list-${n}`, role: "listbox", tabindex: "-1", "aria-labelledby": label ? label.id : null });
+    const box = el("div", { class: "dd" }, btn, list);
+    sel.classList.add("dd-native");
+    sel.tabIndex = -1;
+    sel.setAttribute("aria-hidden", "true");
+    sel.after(box);
+    let hot = -1;
+
+    const sync = () => {
+      const o = sel.options[sel.selectedIndex];
+      text.textContent = o ? o.textContent : "";
+    };
+    const build = () => {
+      list.textContent = "";
+      [...sel.options].forEach((o, i) => {
+        const li = el("li", { role: "option", id: `dd-${n}-${i}`, "aria-selected": String(i === sel.selectedIndex),
+          onpointermove: () => setHot(i), onclick: () => choose(i) }, o.textContent);
+        li.style.setProperty("--i", String(Math.min(i, 12)));
+        put(list, li);
+      });
+    };
+    const setHot = (i) => {
+      const items = list.children;
+      if (!items.length) return;
+      hot = Math.max(0, Math.min(items.length - 1, i));
+      for (const li of items) li.classList.remove("hot");
+      items[hot].classList.add("hot");
+      btn.setAttribute("aria-activedescendant", items[hot].id);
+      const li = items[hot];
+      if (li.offsetTop < list.scrollTop) list.scrollTop = li.offsetTop - 6;
+      else if (li.offsetTop + li.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = li.offsetTop + li.offsetHeight - list.clientHeight + 6;
+    };
+    const open = () => {
+      if (box.classList.contains("open")) return;
+      build();
+      const r = btn.getBoundingClientRect();
+      box.classList.toggle("up", window.innerHeight - r.bottom < 300 && r.top > window.innerHeight - r.bottom);
+      box.classList.add("open");
+      btn.setAttribute("aria-expanded", "true");
+      setHot(Math.max(0, sel.selectedIndex));
+      document.addEventListener("pointerdown", outside, true);
+    };
+    const close = (refocus) => {
+      box.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+      btn.removeAttribute("aria-activedescendant");
+      document.removeEventListener("pointerdown", outside, true);
+      if (refocus) btn.focus();
+    };
+    const outside = (e) => { if (!box.contains(e.target)) close(false); };
+    const choose = (i) => {
+      if (i !== sel.selectedIndex) {
+        sel.selectedIndex = i;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        sel.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      sync();
+      close(true);
+    };
+    let typed = "", typedAt = 0;
+    btn.addEventListener("click", () => (box.classList.contains("open") ? close(false) : open()));
+    btn.addEventListener("keydown", (e) => {
+      const isOpen = box.classList.contains("open");
+      const last = sel.options.length - 1;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!isOpen) return open();
+        setHot(hot + (e.key === "ArrowDown" ? 1 : -1));
+      } else if (e.key === "Home" && isOpen) { e.preventDefault(); setHot(0); }
+      else if (e.key === "End" && isOpen) { e.preventDefault(); setHot(last); }
+      else if ((e.key === "Enter" || e.key === " ") && isOpen) { e.preventDefault(); choose(hot); }
+      else if (e.key === "Escape" && isOpen) { e.preventDefault(); close(true); }
+      else if (e.key === "Tab" && isOpen) close(false);
+      else if (e.key.length === 1 && /\S/.test(e.key)) {
+        const now = Date.now();
+        typed = (now - typedAt > 700 ? "" : typed) + e.key.toLowerCase();
+        typedAt = now;
+        const i = [...sel.options].findIndex((o) => o.textContent.trim().toLowerCase().startsWith(typed));
+        if (i >= 0) { if (isOpen) setHot(i); else { sel.selectedIndex = i; sel.dispatchEvent(new Event("change", { bubbles: true })); sync(); } }
+      }
+    });
+    // A click on the field's <label> focuses the hidden select; send it to the button instead.
+    sel.addEventListener("focus", () => btn.focus());
+    sel.addEventListener("change", sync);
+    sync();
+  }
+  function setupDropdowns() {
+    for (const s of document.querySelectorAll("select")) enhanceSelect(s);
+    new MutationObserver((records) => {
+      for (const r of records) for (const node of r.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.tagName === "SELECT") enhanceSelect(node);
+        else for (const s of node.querySelectorAll("select")) enhanceSelect(s);
+      }
+    }).observe(document.body, { childList: true, subtree: true });
   }
 
   // Header buttons when signed in.
@@ -662,8 +851,38 @@
     return { name: "overview", arg: null };
   }
 
+  // The sidebar's highlight slides to the active page rather than jumping.
+  function moveNavInd(instant) {
+    const nav = $(".side nav");
+    if (!nav) return;
+    let ind = nav.querySelector(".nav-ind");
+    if (!ind) ind = put(nav, el("span", { class: "nav-ind", "aria-hidden": "true" })).lastChild;
+    const a = nav.querySelector("a.active");
+    if (!a) { ind.classList.remove("on"); return; }
+    ind.classList.toggle("still", !!instant || !ind.classList.contains("on"));
+    ind.style.transform = `translateY(${a.offsetTop}px)`;
+    ind.style.height = a.offsetHeight + "px";
+    ind.classList.add("on");
+    if (ind.classList.contains("still")) { void ind.offsetWidth; ind.classList.remove("still"); }
+  }
+
+  // Page changes: the old page fades out quickly, and the new page's sections rise in one after another,
+  // including the ones that arrive later once their data loads.
+  function setupViewMotion(view) {
+    if (reducedMotion() || !view.animate) return;
+    new MutationObserver((records) => {
+      if (performance.now() > app.enterUntil) return;
+      for (const r of records) for (const node of r.addedNodes) {
+        if (node.nodeType !== 1 || node.hidden || node.id === "msg") continue;
+        const i = app.enterCount++;
+        node.animate({ opacity: [0, 1], transform: ["translateY(10px)", "none"], filter: ["blur(3px)", "blur(0)"] },
+          { duration: 420, delay: Math.min(i * 55, 330), easing: "cubic-bezier(.2,.7,.2,1)", fill: "backwards" });
+      }
+    }).observe(view, { childList: true });
+  }
+
   async function route() {
-    app.gen++;
+    const gen = ++app.gen;
     for (const id of app.timers) clearInterval(id);
     app.timers = [];
     const { name, arg } = parseRoute();
@@ -674,6 +893,17 @@
       a.classList.toggle("active", on);
       if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     }
+    moveNavInd(!app.routed);
+    const view = $("#view");
+    if (app.routed && !reducedMotion() && view.animate && view.childElementCount) {
+      const out = view.animate({ opacity: [1, 0], transform: ["none", "translateY(-4px)"] }, { duration: 130, easing: "ease-in", fill: "forwards" });
+      await out.finished.catch(() => {});
+      out.cancel();
+      if (!alive(gen)) return;
+    }
+    app.routed = true;
+    app.enterUntil = performance.now() + 1600;
+    app.enterCount = 0;
     $("#app").classList.remove("nav-open");
     $("#burger").setAttribute("aria-expanded", "false");
     $("#page-title").textContent = v.title;
@@ -681,7 +911,6 @@
     ico.textContent = "";
     put(ico, icon(v.icon));
     document.title = `${v.title} | Valence MM`;
-    const view = $("#view");
     view.className = "view" + (v.slim ? " slim" : "");
     view.textContent = "";
     put(view, el("p", { id: "msg", class: "flash", role: "status", "aria-live": "polite", hidden: true }));
@@ -721,6 +950,8 @@
     });
     $("#scrim").addEventListener("click", () => $("#app").classList.remove("nav-open"));
     window.addEventListener("hashchange", route);
+    window.addEventListener("resize", () => moveNavInd(true));
+    setupViewMotion($("#view"));
     api("GET", "/deals").then((r) => setCounts(r.deals)).catch(() => {});
     route();
   }
@@ -2223,6 +2454,9 @@
 
   // ---------- start ----------
   setupTheme();
+  setupTilt();
+  setupDetails();
+  setupDropdowns();
   const page = document.body.dataset.page;
   if (page === "dashboard") {
     dashboardPage();
