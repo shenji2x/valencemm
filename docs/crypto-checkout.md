@@ -56,3 +56,26 @@ No private key or recovery phrase belongs in chat, public source code, browser
 storage, or the checkout form. No live custody adapter or wallet signer is included
 in this change. The older local EVM/signing lab remains an independent developer
 test tool, not the customer checkout.
+
+## Deal payment selection and backend boundaries
+
+New deals accept `paymentType: "stripe"` (default for existing clients) or
+`paymentType: "crypto"` with `cryptoAsset: "BTC" | "ETH" | "LTC" | "SOL"`.
+The server fixes the corresponding native network; other networks and USDT are
+rejected. The choice is persisted in the deal snapshot, returned in invite
+previews, and cannot be changed after creation. The agreed fiat value is a
+reference value, not a crypto exchange quote. Browser-supplied destinations,
+fee rates, confirmation counts and payment states are not saved as payment facts.
+
+Stripe funding, confirmation, capture, cancellation, refund, webhook lookup and
+timer sweeps exclude crypto deals. Stripe intent confirmations validate the
+stored intent, amount, currency and deal metadata; Connect payment webhooks must
+match the seller account and fetch current provider state to handle stale events.
+
+**Live custody is not implemented or enabled.** These boundaries are defense in
+depth, not a claim that automatic crypto payouts are production ready. There is
+no browser, environment flag or API request that enables a live crypto invoice.
+No deposit destination is issued until a chain-specific observer, durable payout
+worker and independently secured signer are connected and tested. Do not put
+seed phrases or wallet keys into the browser, GitHub or chat.
+

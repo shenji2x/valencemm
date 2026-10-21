@@ -1,4 +1,4 @@
-// Store for the Valence prototype. PLAY CREDITS ONLY, no real money.
+// Deal records and provider-confirmed payment state. Never stores wallet keys.
 // The working copy lives in memory; persist.js saves a snapshot to durable storage after
 // every change (Cloud Storage in production) and loads it back on startup.
 
@@ -7,6 +7,7 @@ const { promisify } = require("util");
 const { ApiError } = require("./errors");
 const sec = require("./security");
 const money = require("./money");
+const { paymentSelection, requireCardDeal } = require("./crypto-checkout");
 const { reservedUsername, weakPassword } = require("./policy");
 
 const scrypt = promisify(crypto.scrypt);
@@ -180,7 +181,10 @@ function createStore({ now = () => Date.now() } = {}) {
       currency: deal.currency || money.DEFAULT_CURRENCY,
       feeBps: FEE_BPS,
       rail: deal.rail || "card",
-      quote: money.quoteRange(deal.amount, { code: deal.currency || money.DEFAULT_CURRENCY }),
+      paymentType: deal.rail === "crypto" ? "crypto" : "stripe",
+      cryptoAsset: deal.cryptoAsset || null,
+      cryptoNetwork: deal.cryptoNetwork || null,
+      quote: deal.rail === "crypto" ? null : money.quoteRange(deal.amount, { code: deal.currency || money.DEFAULT_CURRENCY }),
       payment: paymentView(deal),
       // Both sides see that a deal is frozen and why. Staff notes are not part of this.
       dispute: deal.dispute
@@ -642,7 +646,7 @@ function createStore({ now = () => Date.now() } = {}) {
         logEvent(account.id, null, "payouts_ready", { ref: account.connect.stripeAccountId });
         // Deals that were waiting on this seller can be paid now.
         for (const d of deals.values()) {
-          if (d.sellerId === account.id && d.state === "awaiting_setup") setState(d, "joined", null);
+          if (d.rail !== "crypto" && d.sellerId === account.id && d.state === "awaiting_setup") setState(d, "joined", null);
         }
       }
       return payoutsView(account);
@@ -667,14 +671,14 @@ function createStore({ now = () => Date.now() } = {}) {
     // A delivered deal the buyer hasn't objected to, past the inspection window.
     dealsDueForAutoRelease(windowMs) {
       return [...deals.values()].filter((d) =>
-        d.state === "delivered" && d.deliveredAt && now() - d.deliveredAt >= windowMs &&
+        d.rail !== "crypto" && d.state === "delivered" && d.deliveredAt && now() - d.deliveredAt >= windowMs &&
         d.payment && d.payment.status === "held");
     },
 
     // Holds that are about to expire on their own. These must be captured or cancelled, not left.
     dealsWithExpiringHolds() {
       return [...deals.values()].filter((d) =>
-        d.payment && d.payment.status === "held" && money.holdAtRisk(d.payment.authorizedAt, now()));
+        d.rail !== "crypto" && d.payment && d.payment.status === "held" && money.holdAtRisk(d.payment.authorizedAt, now()));
     },
 
     dealById(dealId) {
@@ -682,11 +686,12 @@ function createStore({ now = () => Date.now() } = {}) {
     },
 
     dealByIntent(intentId) {
-      for (const d of deals.values()) if (d.payment && d.payment.intentId === intentId) return d;
+      for (const d of deals.values()) if (d.rail !== "crypto" && d.payment && d.payment.provider === "stripe" && d.payment.intentId === intentId) return d;
       return null;
     },
 
     createDeal(account, input) {
+      const selection = paymentSelection(input);
       const title = cleanText(input.title, "title", { max: 100 });
       const description = input.description == null ? "" : cleanText(input.description, "description", { min: 0, max: 500 });
       // Amounts are integer cents. The client never sends a price we then trust for a charge:
@@ -720,7 +725,7 @@ function createStore({ now = () => Date.now() } = {}) {
       do code = newInviteCode(); while (dealsByInvite.has(code));
       const deal = {
         id: randomId("deal"), type, joinKind, title, description, amount, deadlineHours,
-        currency: currencyCode, rail: "card", payment: null, dispute: null,
+        currency: currencyCode, ...selection, payment: null, dispute: null,
         state: "open", creatorId: account.id,
         buyerId: role === "buyer" ? account.id : null,
         sellerId: role === "seller" ? account.id : null,
@@ -770,6 +775,7 @@ function createStore({ now = () => Date.now() } = {}) {
     // Checks everything that must be true before we ask the buyer for a card, and prices the deal.
     beginFunding(account, dealId) {
       const deal = mustGetDeal(account, dealId);
+      requireCardDeal(deal);
       if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can fund the deal");
       if (deal.state === "funded") throw new ApiError(409, "already_funded", "This deal is already funded");
       if (deal.state !== "joined" && deal.state !== "awaiting_setup" && deal.state !== "funding") {
@@ -792,6 +798,7 @@ function createStore({ now = () => Date.now() } = {}) {
 
     // Remember the intent we created, before the buyer has entered a card.
     attachIntent(deal, { provider, intentId, stripeAccountId, quote }) {
+      requireCardDeal(deal);
       deal.payment = {
         id: randomId("pay"), provider, intentId, stripeAccountId,
         status: "pending",
@@ -806,6 +813,7 @@ function createStore({ now = () => Date.now() } = {}) {
 
     // The card was authorised. Money is held on it; nothing has been captured.
     markHeld(deal, { brand, last4, authorizedAt } = {}) {
+      requireCardDeal(deal);
       const p = deal.payment;
       if (!p) throw new ApiError(409, "no_payment", "This deal has no payment");
       if (p.status === "held" || p.status === "captured") return deal; // webhooks arrive more than once
@@ -823,6 +831,7 @@ function createStore({ now = () => Date.now() } = {}) {
     },
 
     markHeldFailed(deal, reason) {
+      requireCardDeal(deal);
       if (deal.payment) deal.payment.status = "failed";
       if (deal.state === "funding") setState(deal, "joined", deal.buyerId);
       logEvent(deal.buyerId, deal.id, "payment_failed", { detail: reason || null });
@@ -844,6 +853,7 @@ function createStore({ now = () => Date.now() } = {}) {
     // Who may release, and is it safe to. Does not touch money.
     beginRelease(account, dealId, { byTimer = false } = {}) {
       const deal = mustGetDeal(account, dealId);
+      requireCardDeal(deal);
       if (!byTimer && deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can release the funds");
       if (deal.state !== "funded" && deal.state !== "delivered") {
         throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded to release`);
@@ -855,6 +865,7 @@ function createStore({ now = () => Date.now() } = {}) {
 
     // Stripe captured the hold: the seller has been paid, and Valence's fee was taken with it.
     markReleased(deal, byId, { processorFee = null, sellerNet = null, capturedAt } = {}) {
+      requireCardDeal(deal);
       const p = deal.payment;
       if (p.status === "captured") return deal;
       p.status = "captured";
@@ -870,6 +881,7 @@ function createStore({ now = () => Date.now() } = {}) {
     // Who may cancel the hold, and is the deal in a state where that is allowed.
     beginRefund(account, dealId) {
       const deal = mustGetDeal(account, dealId);
+      requireCardDeal(deal);
       if (deal.state !== "funded" && deal.state !== "delivered") {
         throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded to refund`);
       }
@@ -884,6 +896,7 @@ function createStore({ now = () => Date.now() } = {}) {
 
     // The hold was cancelled (or, rarely, a captured payment was refunded).
     markRefunded(deal, byId, { reason = null, refunded = false } = {}) {
+      requireCardDeal(deal);
       const p = deal.payment;
       if (p.status === "canceled" || p.status === "refunded") return deal;
       p.status = refunded ? "refunded" : "canceled";
@@ -909,6 +922,7 @@ function createStore({ now = () => Date.now() } = {}) {
 
     // A chargeback: the buyer's bank went around us. Recorded for the owner, not actionable here.
     recordChargeback(deal, detail) {
+      requireCardDeal(deal);
       deal.dispute = { ...(deal.dispute || {}), kind: "chargeback", state: "open", openedAt: now(), detail: detail || null };
       if (deal.state === "funded" || deal.state === "delivered") setState(deal, "disputed", null);
       logEvent(deal.sellerId, deal.id, "chargeback", { detail: detail || null, ref: deal.payment && deal.payment.intentId });
@@ -961,6 +975,10 @@ function createStore({ now = () => Date.now() } = {}) {
         title: deal.title,
         description: deal.description,
         amount: deal.amount,
+        currency: deal.currency || money.DEFAULT_CURRENCY,
+        paymentType: deal.rail === "crypto" ? "crypto" : "stripe",
+        cryptoAsset: deal.cryptoAsset || null,
+        cryptoNetwork: deal.cryptoNetwork || null,
         feeBps: FEE_BPS,
         deadlineHours: deal.deadlineHours,
         creator,
@@ -1308,3 +1326,4 @@ function createStore({ now = () => Date.now() } = {}) {
 }
 
 module.exports = { createStore, FEE_BPS, MIN_AMOUNT, MAX_AMOUNT, DEAL_TYPES, TICKET_CATEGORIES };
+

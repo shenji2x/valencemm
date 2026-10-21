@@ -58,4 +58,29 @@ function refuseUnconfiguredInvoice(symbol) {
   enabledAsset(symbol);
   throw new ApiError(503, "crypto_not_ready", cryptoMethods().reason);
 }
-module.exports = { cryptoMethods, nativeBreakdown, refuseUnconfiguredInvoice };
+// The agreed rail is immutable. Only these fields are accepted from a new deal;
+// destinations, exchange rates, fees and payment state are never client supplied.
+function paymentSelection(input) {
+  const type = input.paymentType == null ? "stripe" : input.paymentType;
+  if (type !== "stripe" && type !== "crypto") throw new ApiError(400, "invalid_payment_type", "Choose Stripe or crypto");
+  if (input.rail != null && input.rail !== (type === "crypto" ? "crypto" : "card")) {
+    throw new ApiError(400, "payment_type_mismatch", "Payment type and rail do not match");
+  }
+  if (type === "stripe") {
+    if (input.cryptoAsset != null || input.cryptoNetwork != null) throw new ApiError(400, "payment_type_mismatch", "A Stripe deal cannot select a crypto asset");
+    return { rail: "card", cryptoAsset: null, cryptoNetwork: null };
+  }
+  const asset = enabledAsset(input.cryptoAsset);
+  if (input.cryptoNetwork != null && input.cryptoNetwork !== asset.network) {
+    throw new ApiError(400, "unsupported_network", `Use ${asset.symbol} on ${asset.network} only`);
+  }
+  return { rail: "crypto", cryptoAsset: asset.symbol, cryptoNetwork: asset.network };
+}
+function requireCardDeal(deal) {
+  if ((deal.rail || "card") !== "card") throw new ApiError(409, "payment_type_mismatch", "This is a crypto deal. Stripe cannot fund, confirm, release or refund it.");
+}
+function requireCryptoDeal(deal, symbol) {
+  enabledAsset(symbol);
+  if (deal.rail !== "crypto" || deal.cryptoAsset !== symbol) throw new ApiError(409, "payment_type_mismatch", "Use the payment type and coin agreed when this deal was created");
+}
+module.exports = { cryptoMethods, nativeBreakdown, refuseUnconfiguredInvoice, paymentSelection, requireCardDeal, requireCryptoDeal };

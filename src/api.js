@@ -3,7 +3,7 @@ const { clientIp, ipKey, bearer, sendJson, readJson, readRaw, limiter, quota } =
 const { createPow } = require("./pow");
 const { createSupport } = require("./support");
 const money = require("./money");
-const { cryptoMethods, refuseUnconfiguredInvoice } = require("./crypto-checkout");
+const { cryptoMethods, refuseUnconfiguredInvoice, requireCryptoDeal } = require("./crypto-checkout");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
 
 const DEFAULT_INVITE = "https://discord.gg/eVYyxbyy22";
@@ -165,6 +165,7 @@ function createApi(store, opts = {}) {
   add("POST", "/deals/:id/crypto/invoice", { auth: true, limit: payLimit }, ({ account, params, body }) => {
     const deal = store.getDeal(account, params.id);
     if (deal.yourRole !== "buyer") throw new ApiError(403, "not_buyer", "Only the buyer can request a deposit invoice");
+    requireCryptoDeal(deal, body.asset);
     if (!["joined", "awaiting_setup", "funding"].includes(deal.state)) {
       throw new ApiError(409, "wrong_state", "This deal cannot accept a new deposit");
     }

@@ -6,11 +6,11 @@
     const n = document.createElement(tag); if (text !== undefined && text !== null) n.textContent = text;
     if (className) n.className = className; return n;
   }
-  function mount(host, { request, dealId = null }) {
+  function mount(host, { request, dealId = null, asset: agreedAsset = null }) {
     let generation = 0, selected, disposed = false, expiryTimer;
     const title = node("div", null, "cc-heading");
     title.append(node("div", "Pay with crypto", "cc-title"), node("span", "1% Valence fee", "badge"));
-    const subtitle = node("p", "Choose a coin. Your deposit quote will show the network, every fee, and the exact amount to send.", "muted");
+    const subtitle = node("p", agreedAsset ? `Agreed payment: ${agreedAsset}. Your deposit quote will show the network, every fee, and the exact amount to send.` : "Choose a coin. Your deposit quote will show the network, every fee, and the exact amount to send.", "muted");
     const choices = node("div", null, "cc-choices"); choices.setAttribute("role", "group"); choices.setAttribute("aria-label", "Cryptocurrency");
     const notice = node("p", "Loading payment methods...", "hint"); notice.setAttribute("role", "status");
     const content = node("div");
@@ -89,13 +89,14 @@
       if (disposed) return;
       notice.textContent = policy.ready ? "Only pay a current invoice for this deal." : policy.reason;
       for (const asset of policy.assets) {
+        if (agreedAsset && asset.symbol !== agreedAsset) continue;
         const button = node("button", null, "cc-coin"); button.type = "button"; button.dataset.asset = asset.symbol;
         button.disabled = asset.disabled || asset.symbol === "USDT"; button.setAttribute("aria-pressed", "false");
         button.append(node("strong", asset.symbol), node("span", asset.name), node("small", asset.disabled ? "Temporarily disabled" : asset.network));
         button.addEventListener("click", () => load(asset.symbol)); choices.append(button);
         if (asset.disabled && asset.reason) { const reason = node("p", asset.reason + " If USDT is enabled later, its payout gas quote must be acknowledged before release.", "hint"); host.append(reason); }
       }
-      const initial = policy.assets.find(a => !a.disabled); if (initial) load(initial.symbol);
+      const initial = policy.assets.find(a => !a.disabled && (!agreedAsset || a.symbol === agreedAsset)); if (initial) load(initial.symbol);
     }).catch(error => { notice.textContent = error.message || "Could not load payment methods"; });
     return { destroy() { disposed = true; generation++; clearInterval(expiryTimer); } };
   }

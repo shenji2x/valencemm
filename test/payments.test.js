@@ -213,7 +213,7 @@ test("webhooks: a bad signature is refused, a good one funds the deal, a replay 
   await ctx.payments.startFunding(buyer.rec, deal.id);
   const intent = ctx.fake.authorize(ctx.fake.lastIntent().id);
 
-  const event = { id: "evt_1", type: "payment_intent.amount_capturable_updated", data: { object: { ...intent, status: "requires_capture" } } };
+  const event = { id: "evt_1", account: seller.rec.connect.stripeAccountId, type: "payment_intent.amount_capturable_updated", data: { object: { ...intent, status: "requires_capture" } } };
   const signed = ctx.fake.sign(event);
 
   assert.equal(ctx.stripe.verifyWebhook(signed.payload, "t=1,v1=deadbeef").ok, false);
@@ -257,6 +257,7 @@ test("a chargeback webhook freezes the deal", async (t) => {
 
   await ctx.payments.handleWebhook({
     type: "charge.dispute.created",
+    account: ctx.fake.lastIntent().on_account,
     data: { object: { id: "dp_1", payment_intent: intentId, reason: "fraudulent" } },
   });
   const view = ctx.store.getDeal(buyer.rec, dealId);
@@ -270,6 +271,34 @@ test("a webhook for something we don't know about is ignored, not an error", asy
   assert.equal((await ctx.payments.handleWebhook({ type: "invoice.paid", data: { object: {} } })).handled, false);
   assert.equal((await ctx.payments.handleWebhook({ type: "payment_intent.succeeded", data: { object: { id: "pi_nope" } } })).handled, false);
   assert.equal((await ctx.payments.handleWebhook(null)).handled, false);
+});
+
+test("webhooks reject the wrong connected account and ignore stale statuses after a refund", async t => {
+  const ctx = await setup(); t.after(ctx.close);
+  const { buyer, seller, dealId } = await held(ctx);
+  const intent = { ...ctx.fake.lastIntent() };
+  const event = { type: "payment_intent.succeeded", account: "acct_other", data: { object: intent } };
+  assert.equal((await ctx.payments.handleWebhook(event)).handled, false);
+  assert.equal(ctx.store.getDeal(buyer.rec, dealId).state, "funded");
+  await ctx.payments.refund(seller.rec, dealId);
+  await ctx.payments.handleWebhook({ ...event, account: intent.on_account, data: { object: { ...intent, status: "requires_capture" } } });
+  assert.equal(ctx.store.getDeal(buyer.rec, dealId).state, "refunded");
+  assert.equal(ctx.store.getDeal(buyer.rec, dealId).payment.status, "canceled");
+});
+
+test("provider confirmation verifies amount, currency, intent and deal identity before funding", async t => {
+  const ctx = await setup(); t.after(ctx.close);
+  const buyer = ctx.agent("buyer"), seller = ctx.agent("seller"); await ctx.onboard(seller);
+  const d = ctx.store.createDeal(buyer.rec, { title: "Verification", amount: 50000 }); ctx.store.joinDeal(seller.rec, d.inviteCode);
+  await ctx.payments.startFunding(buyer.rec, d.id);
+  const intent = ctx.fake.authorize(ctx.fake.lastIntent().id);
+  for (const [key, wrong] of [["amount", 1], ["currency", "eur"], ["id", "pi_other"], ["metadata", { valence_deal_id: "deal_other" }]]) {
+    const original = intent[key]; intent[key] = wrong;
+    await assert.rejects(ctx.payments.confirmFunding(buyer.rec, d.id), e => e.code === "payment_verification_failed");
+    assert.equal(ctx.store.getDeal(buyer.rec, d.id).state, "funding"); intent[key] = original;
+  }
+  await ctx.payments.confirmFunding(buyer.rec, d.id);
+  assert.equal(ctx.store.getDeal(buyer.rec, d.id).state, "funded");
 });
 
 test("a delivered deal nobody responds to releases on its own", async (t) => {
@@ -314,3 +343,4 @@ test("with no Stripe key, every money route refuses clearly instead of half work
   assert.equal(payments.startTimers(), null); // nothing to sweep
   assert.deepEqual(stripe.verifyWebhook("{}", "t=1,v1=x"), { ok: false, reason: "no_webhook_secret" });
 });
+
