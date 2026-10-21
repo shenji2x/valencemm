@@ -1,0 +1,4 @@
+.wallet-address{overflow-wrap:anywhere;font:15px/1.7 ui-monospace,monospace;color:var(--accent)}
+.wallet-steps{padding-left:22px;color:var(--muted);font-size:14px}.wallet-steps li{margin:10px 0}
+.wallet-message{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font:12px/1.6 ui-monospace,monospace}
+.panel>#feedback{margin:18px 0}footer a{color:var(--accent)}#message-review{margin:24px 0}
