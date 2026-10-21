@@ -1360,7 +1360,7 @@
   const DEADLINES = [[12, "12 hours"], [24, "1 day"], [48, "2 days"], [72, "3 days"], [168, "7 days"]];
 
   function viewNewDeal(view) {
-    const draft = { type: null, role: null, title: "", description: "", amount: "", deadlineHours: 72, key: newKey() };
+    const draft = { type: null, role: null, title: "", description: "", amount: "", paymentType: "stripe", cryptoAsset: "BTC", deadlineHours: 72, key: newKey() };
     const STEPS = ["Who", "What", "How much", "Review"];
     let step = 0;
     const body = el("div", { class: "card" });
@@ -1387,7 +1387,7 @@
           el("div", { class: "choices" }, typeOptions(app.me.kind).map(([v, t, s]) => choice(draft.type === v, t, s, () => { draft.type = v; draw(); }))),
           el("p", { class: "q spaced" }, "Are you paying or getting paid?"),
           el("div", { class: "choices" },
-            choice(draft.role === "buyer", "I'm paying", "You pay by card. The money is held, not sent, until you release it.", () => { draft.role = "buyer"; draw(); }),
+            choice(draft.role === "buyer", "I'm paying", "Choose Stripe or crypto in the payment step. Release pays the other side.", () => { draft.role = "buyer"; draw(); }),
             choice(draft.role === "seller", "I'm getting paid", "You do the work and receive the funds.", () => { draft.role = "seller"; draw(); })),
           nav("Continue", null, { canBack: false }));
         form.onsubmit = (e) => {
@@ -1427,12 +1427,22 @@
         const amount = el("input", { id: "deal-amount", name: "amount", type: "text", inputmode: "decimal", autocomplete: "off", required: true, placeholder: "0.00" });
         amount.value = draft.amount;
         const note = el("p", { class: "hint" });
+        const crypto = draft.paymentType === "crypto";
+        const paymentChoices = el("div", { class: "choices", role: "group", "aria-label": "Payment type" },
+          choice(!crypto, "Stripe · Card", "Card authorization until release. Buyer pays the quoted Valence fee; Stripe processing fees reduce the seller's payout. Seller needs Stripe payout setup.", () => { draft.amount = amount.value; draft.paymentType = "stripe"; draw(); }),
+          choice(crypto, "Crypto · BTC, ETH, LTC, SOL", "Choose a coin and its native network. Buyer covers 1% plus network fees. Crypto funding is not open yet; you can save the deal, but cannot deposit.", () => { draft.amount = amount.value; draft.paymentType = "crypto"; draw(); }));
+        const coinSelect = el("select", { id: "deal-crypto", name: "cryptoAsset" },
+          ...[["BTC", "Bitcoin"], ["ETH", "Ethereum"], ["LTC", "Litecoin"], ["SOL", "Solana"]].map(([symbol, network]) =>
+            el("option", { value: symbol, selected: symbol === draft.cryptoAsset || undefined }, `${symbol} on ${network}`)),
+          el("option", { value: "USDT", disabled: true }, "USDT · temporarily disabled on all networks"));
+        coinSelect.addEventListener("change", () => { draft.cryptoAsset = coinSelect.value; updateNote(); });
         const updateNote = () => {
           const code = draft.currency;
           const cents = parseMoney(amount.value);
           if (cents === null) { note.textContent = `Between ${fmt(MIN_AMOUNT, code)} and ${fmt(MAX_AMOUNT, code)}.`; return; }
           const q = quoteFor(cents, code);
-          note.textContent = `The buyer pays ${fmt(q.buyerTotal, code)}, including our ${fmt(q.platformFee, code)} fee. The seller is quoted ${fmt(cents, code)} and receives about ${fmt(q.sellerNet, code)} after Stripe's card fee.`;
+          if (crypto) { note.textContent = `Agreed value: ${fmt(cents, code)}. The future invoice will quote the exact ${draft.cryptoAsset} amount, 1% Valence fee and outgoing network fee reserve. Sending wallet fees are separate. No swap is included; deposit and payout use the same coin and network.`; return; }
+          note.textContent = `The buyer pays ${fmt(q.buyerTotal, code)}, including our ${fmt(q.platformFee, code)} fee (1%, minimum ${fmt(50, code)} for card deals). The seller is quoted ${fmt(cents, code)} and receives about ${fmt(q.sellerNet, code)} after Stripe's card fee.`;
         };
         currSel.addEventListener("change", () => {
           draft.currency = currSel.value;
@@ -1445,13 +1455,17 @@
         updateNote();
         put(form,
           el("p", { class: "q" }, "How much, and how long?"),
+          el("p", { class: "q spaced" }, "Payment type"), paymentChoices,
+          crypto ? el("label", { for: "deal-crypto" }, "Cryptocurrency and network") : null,
+          crypto ? coinSelect : null,
+          crypto ? el("p", { class: "hint" }, "USDT is disabled on all networks because outgoing transfers need a funded gas wallet. Crypto transfers are generally irreversible. Both sides will see the chosen coin before joining. The payout network fee must be acknowledged before release or refund.") : null,
           el("label", { for: "deal-currency" }, "Currency"),
           currSel,
           el("label", { for: "deal-amount" }, "Amount"),
           el("div", { class: "amount-input" }, symSpan, amount),
           note,
           el("label", {}, "Refund deadline"),
-          el("p", { class: "hint" }, "If the deal isn't finished this long after the buyer pays, the buyer can cancel and the hold is released."),
+          el("p", { class: "hint" }, crypto ? "The buyer becomes eligible to request a refund after this deadline. A crypto refund requires a blockchain transaction and network fee." : "If the deal isn't finished this long after the buyer pays, the buyer can cancel and the hold is released."),
           el("div", { class: "chips", role: "group", "aria-label": "Refund deadline" }, DEADLINES.map(([h, label]) =>
             el("button", { type: "button", class: "chip", "aria-pressed": String(draft.deadlineHours === h), onclick: () => { draft.amount = amount.value; draft.deadlineHours = h; draw(); } }, label))),
           nav("Review deal"));
@@ -1468,6 +1482,7 @@
       if (step === 3) {
         const n = parseMoney(draft.amount);
         const q = quoteFor(n, draft.currency);
+        const crypto = draft.paymentType === "crypto";
         const other = typeOptions(app.me.kind).find(([v]) => v === draft.type)[1].toLowerCase();
         put(form,
           el("p", { class: "q" }, "Check the details"),
@@ -1478,10 +1493,12 @@
             el("dt", {}, "You are"), el("dd", {}, draft.role === "buyer" ? "Paying (sender)" : "Getting paid (receiver)"),
             el("dt", {}, "Currency"), el("dd", {}, (CURRENCY_META[draft.currency] || CURRENCY_META.usd).label),
             el("dt", {}, "Deal amount"), el("dd", {}, fmt(n, draft.currency)),
-            el("dt", {}, draft.role === "buyer" ? "You pay" : "The buyer pays"), el("dd", {}, fmt(q.buyerTotal, draft.currency)),
-            el("dt", {}, draft.role === "seller" ? "You receive, about" : "The seller receives, about"), el("dd", {}, fmt(q.sellerNet, draft.currency)),
+            el("dt", {}, "Payment type"), el("dd", {}, crypto ? `Crypto · ${draft.cryptoAsset} (native network only)` : "Stripe · Card"),
+            el("dt", {}, draft.role === "buyer" ? "You pay" : "The buyer pays"), el("dd", {}, crypto ? "Exact coin amount + 1% + network fees, quoted before deposit" : fmt(q.buyerTotal, draft.currency)),
+            el("dt", {}, draft.role === "seller" ? "You receive, about" : "The seller receives, about"), el("dd", {}, crypto ? "Same coin and network, shown in the payout quote" : fmt(q.sellerNet, draft.currency)),
             el("dt", {}, "Refund deadline"), el("dd", {}, `${DEADLINES.find(([h]) => h === draft.deadlineHours)[1]} after the buyer pays`)),
           el("p", { class: "hint" }, "Next you'll get a one-time invite code to send to the other side. Nobody pays anything until they've joined."),
+          crypto ? el("p", { class: "flash warn" }, "Crypto deposits are not open yet. This creates an unfunded deal only. A deposit address will appear only after secure deposit tracking and automatic payouts are connected.") : null,
           nav("Create deal"));
         form.onsubmit = async (e) => {
           e.preventDefault();
@@ -1491,6 +1508,7 @@
             const deal = await api("POST", "/deals", {
               type: draft.type, role: draft.role, title: draft.title, description: draft.description,
               amount: n, deadlineHours: draft.deadlineHours, currency: draft.currency,
+              paymentType: draft.paymentType, ...(crypto ? { cryptoAsset: draft.cryptoAsset } : {}),
             }, { headers: { "Idempotency-Key": draft.key } });
             location.hash = "#deal/" + encodeURIComponent(deal.id);
           } catch (err) {
@@ -1535,10 +1553,12 @@
           el("dt", {}, "From"), el("dd", {}, `${p.creator.name} (${kindLabel(p.creator.kind)})`),
           el("dt", {}, "Deal type"), el("dd", {}, TYPE_LABELS[p.type]),
           el("dt", {}, "You'll be"), el("dd", {}, p.yourRole === "buyer" ? "Paying (sender)" : "Getting paid (receiver)"),
-          el("dt", {}, "Amount"), el("dd", {}, `${fmt(p.amount)}`),
-          el("dt", {}, "Receiver gets, about"), el("dd", {}, fmt(quoteFor(p.amount, p.currency).sellerNet, p.currency)),
+          el("dt", {}, "Amount"), el("dd", {}, fmt(p.amount, p.currency)),
+          el("dt", {}, "Payment type"), el("dd", {}, p.paymentType === "crypto" ? `Crypto · ${p.cryptoAsset} on ${p.cryptoNetwork}` : "Stripe · Card"),
+          el("dt", {}, "Receiver gets, about"), el("dd", {}, p.paymentType === "crypto" ? "Same coin and network; payout quote required" : fmt(quoteFor(p.amount, p.currency).sellerNet, p.currency)),
           el("dt", {}, "Refund deadline"), el("dd", {}, `${p.deadlineHours} hours after funding`)),
         p.canJoin ? null : el("p", { class: "flash error" }, p.reason),
+        p.paymentType === "crypto" ? el("p", { class: "flash warn" }, "Crypto funding is not open yet. Buyer pays 1% plus network fees. No swap is included. This deal will remain unfunded until secure deposits and automatic payouts are connected.") : null,
         el("div", { class: "wiz-nav" },
           el("button", { type: "button", class: "btn ghost", onclick: () => askCode(p.inviteCode) }, "Back"),
           p.canJoin ? el("button", {
@@ -1641,7 +1661,7 @@
 
     // True while the buyer has the card form open, so a poll can't tear it down under them.
     let paying = false;
-    let payMethod = "card";
+    const payMethod = deal.paymentType === "crypto" ? "crypto" : "card";
 
     async function ask(action, promptText, okText, extra = {}) {
       const answer = promptText ? prompt(promptText) : "";
@@ -1683,6 +1703,14 @@
         draw();
       } }, "Open a dispute");
 
+      if (payMethod === "crypto" && ["joined", "funding", "awaiting_setup"].includes(deal.state)) {
+        put(p, el("h3", {}, buyer ? `Pay with ${deal.cryptoAsset}` : "Waiting for a confirmed crypto deposit"),
+          el("p", {}, `This deal uses ${deal.cryptoAsset} on ${deal.cryptoNetwork}. Crypto funding is not open yet. Do not send funds to a personal wallet or start work before a deposit is confirmed.`),
+          buyer ? cryptoPanel(deal) : null,
+          el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+        return p;
+      }
+
       switch (deal.state) {
         case "open": {
           if (deal.inviteCode) {
@@ -1713,22 +1741,8 @@
             break;
           }
           put(p, el("h3", {}, `${other().name} joined. Pay to start the deal.`));
-          if (!paying && payMethod === "crypto") {
-            put(p, el("p", {}, "Choose the cryptocurrency you want to deposit. A current invoice is required before sending any funds."));
-          } else {
-            put(p, el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`), breakdown(q));
-          }
+          put(p, el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`), breakdown(q));
           if (!paying) {
-            const methods = el("div", { class: "seg", role: "group", "aria-label": "Pay with" });
-            for (const [k, l] of [["card", "Card"], ["crypto", "Crypto"]]) {
-              put(methods, el("button", { type: "button", "aria-pressed": String(payMethod === k), onclick: () => { payMethod = k; draw(); } }, l));
-            }
-            put(p, el("div", { class: "pay-with" }, el("span", {}, "Pay with"), methods));
-          }
-          if (!paying && payMethod === "crypto") {
-            put(p, cryptoPanel(deal),
-              el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
-          } else if (!paying) {
             put(p, el("div", { class: "actions" },
               el("button", { type: "button", class: "btn", onclick: () => { paying = true; draw(); } }, `Pay ${fmt(q.buyerTotal, q.currency)}`),
               confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
@@ -1858,7 +1872,7 @@
       root.textContent = "";
       const q = deal.quote;
       const pay = deal.payment;
-      const cryptoQuoteMode = payMethod === "crypto" && !paying && ["joined", "awaiting_setup", "funding"].includes(deal.state);
+      const cryptoQuoteMode = payMethod === "crypto";
       put(root,
         el("div", { class: "deal-head" },
           el("h2", {}, deal.title),
@@ -1873,6 +1887,7 @@
             el("dt", {}, "Buyer (pays)"), el("dd", {}, partyName(deal.buyer)),
             el("dt", {}, "Seller (gets paid)"), el("dd", {}, partyName(deal.seller)),
             el("dt", {}, "Deal amount"), el("dd", {}, fmt(deal.amount, deal.currency)),
+            el("dt", {}, "Payment type"), el("dd", {}, cryptoQuoteMode ? `Crypto · ${deal.cryptoAsset} on ${deal.cryptoNetwork}` : "Stripe · Card"),
             el("dt", {}, "Buyer pays"), el("dd", {}, cryptoQuoteMode ? "Exact crypto amount from the deposit invoice" : fmt(q.buyerTotal, q.currency)),
             el("dt", {}, "Valence fee"), el("dd", {}, cryptoQuoteMode ? "Exactly 1% of the crypto deal amount, paid by the buyer" : `${fmt(q.platformFee, q.currency)} (1%, paid by the buyer)`),
             cryptoQuoteMode ? null : el("dt", {}, "Card processing"), cryptoQuoteMode ? null : el("dd", {}, pay && pay.processorFee != null
@@ -1945,7 +1960,6 @@
     const [history, payouts] = await Promise.all([api("GET", "/payments"), api("GET", "/payouts")]);
     if (!alive(gen)) return;
     put(view, payoutsCard(payouts));
-    put(view, el("section", { class: "card" }, cryptoPanel()));
     if (!history.events.length) {
       put(view, el("section", { class: "card" },
         emptyState("Nothing here yet", "Once a deal is funded, every movement shows up here with the deal it belongs to.",
@@ -1976,7 +1990,7 @@
       put(panel, el("p", { class: "flash error" }, "Crypto checkout could not load. Reload the page before continuing."));
       return panel;
     }
-    window.ValenceCryptoCheckout.mount(panel, { request: api, dealId: deal && deal.id });
+    window.ValenceCryptoCheckout.mount(panel, { request: api, dealId: deal && deal.id, asset: deal && deal.cryptoAsset });
     return panel;
   }
 

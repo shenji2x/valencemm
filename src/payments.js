@@ -14,6 +14,7 @@
 
 const money = require("./money");
 const { ApiError } = require("./errors");
+const { requireCardDeal } = require("./crypto-checkout");
 
 const AUTO_RELEASE_MS = 72 * 3600 * 1000; // after the seller marks delivery and the buyer stays silent
 const SWEEP_EVERY_MS = 15 * 60 * 1000;
@@ -154,6 +155,7 @@ function createPayments({ store, stripe, persistence, siteUrl = "https://valence
     if (!deal || (deal.buyerId !== account.id && deal.sellerId !== account.id)) {
       throw new ApiError(404, "deal_not_found", "Deal not found");
     }
+    requireCardDeal(deal);
     const p = deal.payment;
     if (!p || !p.intentId) throw new ApiError(409, "no_payment", "This deal has no payment to confirm");
     if (p.status === "held" || p.status === "captured") return store.getDeal(account, dealId);
@@ -169,6 +171,14 @@ function createPayments({ store, stripe, persistence, siteUrl = "https://valence
 
   // One place that maps a Stripe intent status onto our deal, used by both polling and webhooks.
   function applyIntent(deal, intent) {
+    requireCardDeal(deal);
+    const p = deal.payment;
+    if (!p || p.provider !== "stripe" || intent.id !== p.intentId || intent.amount !== p.amount ||
+        intent.currency !== p.currency || intent.metadata?.valence_deal_id !== deal.id) {
+      throw new ApiError(502, "payment_verification_failed", "The provider payment does not match this deal. Contact support.");
+    }
+    // A delayed authorization event cannot reopen a completed or disputed deal.
+    if (["released", "refunded", "cancelled", "disputed"].includes(deal.state)) return deal;
     if (intent.status === "requires_capture") return store.markHeld(deal, cardBits(intent));
     if (intent.status === "succeeded") {
       // Captured without us asking: only possible if someone captured in the Stripe dashboard.
@@ -311,7 +321,11 @@ function createPayments({ store, stripe, persistence, siteUrl = "https://valence
     if (type.startsWith("payment_intent.")) {
       const deal = store.dealByIntent(obj.id);
       if (!deal) return { handled: false, reason: "unknown intent" };
-      applyIntent(deal, obj);
+      if (event.account !== deal.payment.stripeAccountId) return { handled: false, reason: "wrong connected account" };
+      // Signed events can arrive out of order. Read the current provider state on
+      // the bound seller account rather than trusting an old event's status.
+      const current = await stripe.getIntent({ stripeAccountId: deal.payment.stripeAccountId, intentId: deal.payment.intentId });
+      applyIntent(deal, current);
       await save();
       return { handled: true, deal: deal.id, state: deal.state };
     }
@@ -320,6 +334,7 @@ function createPayments({ store, stripe, persistence, siteUrl = "https://valence
       const intentId = obj.payment_intent;
       const deal = intentId ? store.dealByIntent(intentId) : null;
       if (!deal) return { handled: false, reason: "unknown intent" };
+      if (event.account !== deal.payment.stripeAccountId) return { handled: false, reason: "wrong connected account" };
       store.recordChargeback(deal, `${type === "charge.dispute.closed" ? `closed as ${obj.status}` : obj.reason || "disputed"}`);
       await save();
       return { handled: true, deal: deal.id };
@@ -343,3 +358,4 @@ function createPayments({ store, stripe, persistence, siteUrl = "https://valence
 }
 
 module.exports = { createPayments, AUTO_RELEASE_MS, feesFromCharge };
+

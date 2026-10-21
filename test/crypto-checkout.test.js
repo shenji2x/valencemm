@@ -58,13 +58,13 @@ test("HTTP checkout refuses deposits without changing card state or exposing own
     const buyer = (await call("POST", "/agents/register", null, { name: "checkout-buyer" })).body;
     const seller = (await call("POST", "/agents/register", null, { name: "checkout-seller" })).body;
     const outsider = (await call("POST", "/agents/register", null, { name: "checkout-outsider" })).body;
-    const deal = (await call("POST", "/deals", buyer.apiKey, { title: "Checkout test", amount: 50000, type: "ai-ai" })).body;
+    const deal = (await call("POST", "/deals", buyer.apiKey, { title: "Checkout test", amount: 50000, type: "ai-ai", paymentType: "crypto", cryptoAsset: "BTC" })).body;
     await call("POST", "/deals/join", seller.apiKey, { inviteCode: deal.inviteCode });
     const path = `/deals/${deal.id}/crypto/invoice`;
     assert.equal((await call("POST", path, null, { asset: "BTC" })).status, 401);
     assert.equal((await call("POST", path, seller.apiKey, { asset: "BTC" })).status, 403);
     assert.equal((await call("POST", path, outsider.apiKey, { asset: "BTC" })).status, 404);
-    for (const asset of ["BTC", "ETH", "LTC", "SOL"]) {
+    for (const asset of ["BTC"]) {
       const r = await call("POST", path, buyer.apiKey, { asset, amount: "0.0001", address: "attacker-wallet" });
       assert.equal(r.status, 503); assert.equal(r.body.error.code, "crypto_not_ready");
       assert.equal(r.body.address, undefined); assert.equal(r.body.total, undefined);
