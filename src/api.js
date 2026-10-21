@@ -5,6 +5,7 @@ const { createSupport } = require("./support");
 const money = require("./money");
 const { cryptoMethods, refuseUnconfiguredInvoice, requireCryptoDeal } = require("./crypto-checkout");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
+const { installBiolink } = require('./biolink');
 
 const DEFAULT_INVITE = "https://discord.gg/eVYyxbyy22";
 
@@ -26,6 +27,7 @@ function createApi(store, opts = {}) {
   const loginLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.loginLimit || 30, code: "login_rate_limited" });
   const joinLimit = limiter({ windowMs: 60 * 1000, max: opts.joinLimit || 20, code: "join_rate_limited" });
   const payLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.payLimit || 40, code: "payment_rate_limited" });
+  const biolink = installBiolink(add, store, opts);
 
   // ---- anti-abuse ----
   // Sign-ups and agent registrations need a solved proof-of-work (see pow.js), and each network can
@@ -260,14 +262,17 @@ function createApi(store, opts = {}) {
   // treat every handler as something that may run more than once.
   add("POST", "/webhooks/stripe", { raw: true, send: true }, async ({ raw, req, res }) => {
     const p = opts.payments;
-    const verified = opts.stripe
+    let verified = opts.stripe
       ? opts.stripe.verifyWebhook(raw, req.headers["stripe-signature"])
       : { ok: false, reason: "stripe_off" };
+    if (!verified.ok && opts.stripe?.acceptsPremiumWebhooks) verified = opts.stripe.verifyWebhook(raw, req.headers['stripe-signature'], { premium: true });
     if (!verified.ok) {
       console.error("Rejected a Stripe webhook:", verified.reason);
       return sendJson(res, 400, { error: { code: "bad_signature", message: "Signature check failed" } });
     }
-    // Answer first: a slow handler must never make Stripe think we are down.
+    // Premium is persisted before acknowledging so Stripe retries failed fulfillment.
+    if (await biolink.webhook(verified.event)) return sendJson(res, 200, { received: true });
+    // Existing deal handlers manage their own reconciliation.
     sendJson(res, 200, { received: true });
     try {
       if (p) await p.handleWebhook(verified.event);
@@ -502,7 +507,7 @@ function createApi(store, opts = {}) {
     let raw = null;
     if (req.method === "POST") {
       if (r.raw) raw = await readRaw(req, MAX_BYTES);
-      else body = await readJson(req);
+      else body = await readJson(req, r.bodyLimit);
     }
     if (r.limit) r.limit(ip);
 

@@ -9,13 +9,14 @@ const sec = require("./security");
 const money = require("./money");
 const { paymentSelection, requireCardDeal } = require("./crypto-checkout");
 const { reservedUsername, weakPassword } = require("./policy");
+const profiles = require('./profiles');
 
 const scrypt = promisify(crypto.scrypt);
 
 const FEE_BPS = money.PLATFORM_BPS; // 1% commission, routed to Valence by Stripe at capture
 const MIN_AMOUNT = money.MIN_AMOUNT;
 const MAX_AMOUNT = money.MAX_AMOUNT;
-const MAX_ACCOUNTS = 5000;
+const MAX_ACCOUNTS = 15000;
 const MAX_DEALS = 20000;
 const MAX_OPEN_DEALS_PER_ACCOUNT = 20;
 const MAX_EVENTS = 200000;
@@ -206,6 +207,7 @@ function createStore({ now = () => Date.now() } = {}) {
       sellerId: deal.sellerId,
       buyer: party(deal.buyerId),
       seller: party(deal.sellerId),
+      expectedSeller: deal.expectedSellerId ? party(deal.expectedSellerId) : null,
       createdAt: new Date(deal.createdAt).toISOString(),
       fundedAt: deal.fundedAt ? new Date(deal.fundedAt).toISOString() : null,
       deadlineAt: deal.deadlineAt ? new Date(deal.deadlineAt).toISOString() : null,
@@ -617,6 +619,45 @@ function createStore({ now = () => Date.now() } = {}) {
       };
     },
 
+    profileOwner(handle) {
+      return byUsername.get(String(handle).toLowerCase()) || byHandle.get(String(handle).toLowerCase()) || null;
+    },
+    profileOwnerById(id) { return accounts.get(id) || null; },
+    profileView(account, { publicView = false } = {}) {
+      const p = account.profile || profiles.defaultProfile(account);
+      const premium = account.premium?.active === true;
+      const handle = account.username || account.handle;
+      const media = {};
+      for (const [slot, row] of Object.entries(account.profileMedia || {})) {
+        if (slot === 'video' && !premium) continue;
+        media[slot] = { url: `/v1/profiles/${encodeURIComponent(handle)}/media/${slot}?v=${row.id}`, size: row.size };
+      }
+      const result = { ...p, links: p.links.slice(0, premium ? 30 : 10), kind: account.kind, layout: !premium && p.layout === 'glass' ? 'centered' : p.layout, effect: premium ? p.effect : 'none', handle, premium, media };
+      if (!publicView) result.analytics = account.profileStats || { views: 0, clicks: 0 };
+      return result;
+    },
+    saveProfile(account, input) {
+      account.profile = { ...profiles.validateProfile(input, account), updatedAt: now() };
+      return this.profileView(account);
+    },
+    profileMetric(account, kind) {
+      account.profileStats ||= { views: 0, clicks: 0 };
+      account.profileStats[kind] = Math.min(Number.MAX_SAFE_INTEGER, (account.profileStats[kind] || 0) + 1);
+    },
+    premiumCheckout(account, sessionId) {
+      account.premiumPurchases ||= [];
+      if (!account.premiumPurchases.includes(sessionId)) account.premiumPurchases.push(sessionId);
+    },
+    grantPremium(account, session) {
+      if (!account.premiumPurchases?.includes(session.id)) throw new ApiError(400, 'unknown_purchase', 'This purchase does not belong to this account');
+      if (account.premium?.revoked && account.premium.paymentIntent === session.payment_intent) throw new ApiError(409, 'purchase_revoked', 'This Premium purchase was refunded or disputed');
+      if (account.premium?.active) return;
+      account.premium = { active: true, sessionId: session.id, paymentIntent: session.payment_intent, purchasedAt: now() };
+    },
+    revokePremium(intentId) {
+      for (const a of accounts.values()) if (a.premium?.paymentIntent === intentId) { a.premium.active = false; a.premium.revoked = true; }
+    },
+
     // Past tense only: what has moved, never what is "available".
     payments(account, { limit = 200 } = {}) {
       return { currency: money.DEFAULT_CURRENCY, events: eventsFor(account.id, limit) };
@@ -692,6 +733,8 @@ function createStore({ now = () => Date.now() } = {}) {
 
     createDeal(account, input) {
       const selection = paymentSelection(input);
+      const target = input.sellerHandle == null ? null : this.profileOwner(input.sellerHandle);
+      if (input.sellerHandle != null && (!target?.profile?.published || !target.profile.showDealButton || target.id === account.id || input.role !== 'buyer')) throw new ApiError(400, 'invalid_seller', 'Choose a published profile belonging to another seller');
       const title = cleanText(input.title, "title", { max: 100 });
       const description = input.description == null ? "" : cleanText(input.description, "description", { min: 0, max: 500 });
       // Amounts are integer cents. The client never sends a price we then trust for a charge:
@@ -717,6 +760,7 @@ function createStore({ now = () => Date.now() } = {}) {
         throw new ApiError(403, "wrong_account_type", "Only people can create human-to-human deals");
       }
       const joinKind = type === "ai-ai" ? "agent" : type === "human-human" ? "human" : account.kind === "agent" ? "human" : "agent";
+      if (target && target.kind !== joinKind) throw new ApiError(400, 'invalid_type', 'Deal type must match the selected seller');
       if (deals.size >= MAX_DEALS) throw new ApiError(503, "capacity", "Prototype is full, try again later");
       if (openDealCount(account.id) >= MAX_OPEN_DEALS_PER_ACCOUNT) {
         throw new ApiError(429, "too_many_open_deals", `You can have at most ${MAX_OPEN_DEALS_PER_ACCOUNT} unfinished deals`);
@@ -724,7 +768,7 @@ function createStore({ now = () => Date.now() } = {}) {
       let code;
       do code = newInviteCode(); while (dealsByInvite.has(code));
       const deal = {
-        id: randomId("deal"), type, joinKind, title, description, amount, deadlineHours,
+        id: randomId("deal"), type, joinKind, title, description, amount, deadlineHours, expectedSellerId: target?.id || null,
         currency: currencyCode, ...selection, payment: null, dispute: null,
         state: "open", creatorId: account.id,
         buyerId: role === "buyer" ? account.id : null,
@@ -742,6 +786,7 @@ function createStore({ now = () => Date.now() } = {}) {
       const deal = deals.get(dealsByInvite.get(code));
       if (!deal) throw new ApiError(404, "invalid_invite", "Invite code not found or already used");
       if (deal.creatorId === account.id) throw new ApiError(400, "own_deal", "You can't join your own deal");
+      if (deal.expectedSellerId && deal.expectedSellerId !== account.id) throw new ApiError(403, 'wrong_seller', 'This deal is reserved for the selected profile owner');
       if (account.kind !== deal.joinKind) {
         throw new ApiError(403, "wrong_account_type", `This deal is for ${deal.joinKind === "agent" ? "an AI agent" : "a person"} to join`);
       }
@@ -969,6 +1014,7 @@ function createStore({ now = () => Date.now() } = {}) {
       let reason = null;
       if (deal.creatorId === account.id) { canJoin = false; reason = "This is your own deal."; }
       else if (account.kind !== deal.joinKind) { canJoin = false; reason = `This deal is for ${deal.joinKind === "agent" ? "an AI agent" : "a person"} to join.`; }
+      else if (deal.expectedSellerId && deal.expectedSellerId !== account.id) { canJoin = false; reason = 'This deal is reserved for the selected profile owner.'; }
       return {
         inviteCode: code,
         type: deal.type,

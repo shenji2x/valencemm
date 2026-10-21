@@ -11,6 +11,7 @@ const { readRaw } = require("./http");
 const { mailerFromEnv } = require("./email");
 const { stripeFromEnv } = require("./stripe");
 const { createPayments } = require("./payments");
+const { r2FromEnv, verifyMedia } = require('./profile-media');
 
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const CONTENT_TYPES = {
@@ -96,7 +97,8 @@ function createApp(opts = {}) {
   const stripe = opts.stripe || stripeFromEnv();
   const payments = opts.payments || createPayments({ store, stripe, persistence, siteUrl: opts.siteUrl || `https://${CANONICAL_HOST}` });
   const apiParts = {};
-  const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, stripe, payments, exports: apiParts });
+  const profileMedia = opts.profileMedia || r2FromEnv();
+  const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, stripe, payments, profileMedia, mediaVerifier: opts.mediaVerifier || verifyMedia, exports: apiParts });
   const statics = loadStatic();
   // Every request counts, pages and files included, not just the API. A normal visit is a few dozen
   // requests; this only stops one address hammering the server.
@@ -104,6 +106,8 @@ function createApp(opts = {}) {
 
   async function handle(req, res) {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+    // Extend only the media directives for the configured private R2 account.
+    if (profileMedia.origin) res.setHeader('Content-Security-Policy', SECURITY_HEADERS['Content-Security-Policy'].replace("connect-src 'self'", `connect-src 'self' ${profileMedia.origin}`).replace("img-src 'self'", `img-src 'self' ${profileMedia.origin}`) + `; media-src 'self' blob: ${profileMedia.origin}`);
     try {
       siteLimit(ipKey(clientIp(req)));
     } catch (err) {
@@ -183,7 +187,9 @@ function createApp(opts = {}) {
     if (req.method !== "GET" && req.method !== "HEAD") {
       return sendError(res, { status: 405, code: "method_not_allowed", message: "Method not allowed", headers: { Allow: "GET, HEAD" } }, false);
     }
-    const file = statics.get(pathname);
+    const isProfile = /^\/u\/[a-zA-Z0-9_-]{1,40}$/.test(pathname);
+    if (isProfile && !store.profileOwner(pathname.slice(3))?.profile?.published) return sendError(res, { status: 404, code: 'not_found', message: 'This profile is not published' }, false);
+    const file = statics.get(isProfile ? '/profile' : pathname);
     if (!file) return sendError(res, { status: 404, code: "not_found", message: "Not found" }, false);
     res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, "Cache-Control": file.cache });
     res.end(req.method === "HEAD" ? undefined : file.body);
@@ -225,3 +231,4 @@ function createApp(opts = {}) {
 }
 
 module.exports = { createApp };
+
