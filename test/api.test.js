@@ -403,7 +403,7 @@ test("logo, icons, manifest and SEO files are served with the right types", () =
   assert.match((await ctx.call("GET", "/robots.txt")).text, /Sitemap: https:\/\/valencemm\.com\/sitemap\.xml/);
   assert.equal(JSON.parse((await ctx.call("GET", "/site.webmanifest")).text).name, "Valence MM");
   const home = (await ctx.call("GET", "/")).text;
-  for (const tag of ['rel="icon"', 'rel="canonical" href="https://valencemm.com/"', 'property="og:image" content="https://valencemm.com/og-image.png"', 'name="twitter:card"', 'rel="manifest"']) {
+  for (const tag of ['rel="icon"', 'rel="canonical" href="https://valencemm.com/"', 'property="og:image" content="https://valencemm.com/og-image.png?v=2"', 'name="twitter:card"', 'rel="manifest"']) {
     assert.ok(home.includes(tag), "home page missing " + tag);
   }
   assert.ok((await ctx.call("GET", "/dashboard")).text.includes('name="robots" content="noindex"'));
