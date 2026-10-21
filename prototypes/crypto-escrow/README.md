@@ -107,6 +107,22 @@ OpenZeppelin SafeERC20 and ReentrancyGuard are used. The compiler and dependenci
 are pinned in the lockfile. The `tmp` override selects a patched compiler dependency.
 `TestActors.sol` contains adversarial fixtures and is not a deployment target.
 
+## Proposed fee recipients
+
+Owner-supplied public addresses are recorded in
+[`config/fee-recipients.json`](config/fee-recipients.json) as proposed service-fee
+recipients only. This is a planning record, not active runtime configuration;
+the local lab continues using its simulated treasury. No customer should send
+an escrow deposit to these addresses. Direct wallet transfers do not create an
+escrow deal, enforce release/refund rules, or split out the 1% fee.
+
+The EVM checksum, Bitcoin Bech32 checksum and witness encoding, Litecoin
+Base58Check checksum/version, and Solana Base58 32-byte length were checked
+locally. These checks do not establish wallet ownership, control, token support
+or the correct network. USDT network/token contract, EVM chain, Solana cluster,
+and a separate EVM arbitration signer remain unconfigured. No private keys or
+seed phrases are required to record public addresses. Live payments remain off.
+
 ## Before any real-money integration
 
 This code is unaudited. The lab uses publicly known development accounts and

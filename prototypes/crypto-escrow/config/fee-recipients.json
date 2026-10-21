@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Proposed Valence service-fee recipients; never customer escrow deposit addresses",
+  "livePaymentsEnabled": false,
+  "ownershipVerified": false,
+  "arbitrator": null,
+  "recipients": {
+    "USDT": {
+      "address": "0x8c4951021512b45d86D0a17604C601A768204550",
+      "network": null,
+      "tokenContract": null
+    },
+    "BTC": {
+      "address": "bc1qrq87dzf6z7y5w9vz9hj5aqgjvseuk7xzl99cfp",
+      "addressEncoding": "Bitcoin mainnet P2WPKH"
+    },
+    "ETH": {
+      "address": "0x8c4951021512b45d86D0a17604C601A768204550",
+      "chainId": null
+    },
+    "SOL": {
+      "address": "EKmnULtPoQx5MxHszM8ZcfyVvgkHQC1feKNJNsfJiWKB",
+      "cluster": null
+    },
+    "LTC": {
+      "address": "LSUUnp7qm1CpyzQoT89figXNYtpLiBySNN",
+      "addressEncoding": "Litecoin mainnet P2PKH"
+    }
+  }
+}
