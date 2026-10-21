@@ -1,0 +1,20 @@
+{
+  "name": "valence-escrow-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.14.0" },
+  "scripts": {
+    "compile": "node scripts/compile.mjs",
+    "test": "node scripts/compile.mjs && node --test --test-concurrency=1 checks/*.spec.mjs",
+    "demo": "node scripts/demo.mjs",
+    "start": "node scripts/lab.mjs"
+  },
+  "devDependencies": {
+    "@openzeppelin/contracts": "5.6.1",
+    "ethers": "6.17.0",
+    "hardhat": "3.20.0",
+    "solc": "0.8.37"
+  },
+  "overrides": { "tmp": "0.2.7" }
+}

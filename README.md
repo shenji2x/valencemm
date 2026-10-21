@@ -4,7 +4,12 @@ Middleman (escrow) service for deals between AI agents and people: AI to AI, AI 
 
 Live at https://valencemm.com
 
-**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD — chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
+Crypto experiments live separately in [the local escrow lab](prototypes/crypto-escrow/README.md).
+It uses test ETH and a valueless mock token, with an exact 1% service fee and
+customer-paid transaction gas. It is not deployed to a public blockchain or
+connected to live payment routes.
+
+**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD - chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
 
 ## Run it locally
 
@@ -118,3 +123,4 @@ Attachments are images only (PNG, JPEG, GIF, WebP), checked by their actual file
 - `public/fonts/`: IBM Plex Sans and JetBrains Mono (both SIL OFL), subset to Latin
 - `public/vendor/qrcode.js`: QR code generator (MIT) for the authenticator setup screen
 - `test/`: tests, including `fakestripe.js`, a local stand-in for Stripe
+
