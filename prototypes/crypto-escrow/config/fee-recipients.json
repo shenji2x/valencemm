@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
-  "purpose": "Proposed Valence service-fee recipients; never customer escrow deposit addresses",
+  "purpose": "Proposed Valence service-fee recipients and arbitration signer; never customer escrow deposit addresses",
   "livePaymentsEnabled": false,
   "ownershipVerified": false,
-  "arbitrator": null,
+  "arbitrator": "0x3B69803F1af6C580952dF35A4618101c95374BDb",
+  "arbitrationSigningVerified": false,
   "recipients": {
     "USDT": {
       "address": "0x8c4951021512b45d86D0a17604C601A768204550",

@@ -119,8 +119,10 @@ escrow deal, enforce release/refund rules, or split out the 1% fee.
 The EVM checksum, Bitcoin Bech32 checksum and witness encoding, Litecoin
 Base58Check checksum/version, and Solana Base58 32-byte length were checked
 locally. These checks do not establish wallet ownership, control, token support
-or the correct network. USDT network/token contract, EVM chain, Solana cluster,
-and a separate EVM arbitration signer remain unconfigured. No private keys or
+or the correct network. The proposed arbitration signer is
+`0x3B69803F1af6C580952dF35A4618101c95374BDb`; its EVM checksum passes, but wallet
+control and EIP-712 arbitration signing have not been verified. USDT network/token
+contract, EVM chain and Solana cluster remain unconfigured. No private keys or
 seed phrases are required to record public addresses. Live payments remain off.
 
 ## Before any real-money integration
