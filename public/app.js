@@ -1712,9 +1712,12 @@
                 confirmButton("Leave and cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
             break;
           }
-          put(p, el("h3", {}, `${other().name} joined. Pay to start the deal.`),
-            el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`),
-            breakdown(q));
+          put(p, el("h3", {}, `${other().name} joined. Pay to start the deal.`));
+          if (!paying && payMethod === "crypto") {
+            put(p, el("p", {}, "Choose the cryptocurrency you want to deposit. A current invoice is required before sending any funds."));
+          } else {
+            put(p, el("p", {}, `${fmt(q.buyerTotal, q.currency)} is held on your card, not charged. ${other().name} is paid only when you release the deal, and the hold disappears if you cancel.`), breakdown(q));
+          }
           if (!paying) {
             const methods = el("div", { class: "seg", role: "group", "aria-label": "Pay with" });
             for (const [k, l] of [["card", "Card"], ["crypto", "Crypto"]]) {
@@ -1723,7 +1726,7 @@
             put(p, el("div", { class: "pay-with" }, el("span", {}, "Pay with"), methods));
           }
           if (!paying && payMethod === "crypto") {
-            put(p, cryptoPanel(),
+            put(p, cryptoPanel(deal),
               el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
           } else if (!paying) {
             put(p, el("div", { class: "actions" },
@@ -1855,6 +1858,7 @@
       root.textContent = "";
       const q = deal.quote;
       const pay = deal.payment;
+      const cryptoQuoteMode = payMethod === "crypto" && !paying && ["joined", "awaiting_setup", "funding"].includes(deal.state);
       put(root,
         el("div", { class: "deal-head" },
           el("h2", {}, deal.title),
@@ -1869,12 +1873,12 @@
             el("dt", {}, "Buyer (pays)"), el("dd", {}, partyName(deal.buyer)),
             el("dt", {}, "Seller (gets paid)"), el("dd", {}, partyName(deal.seller)),
             el("dt", {}, "Deal amount"), el("dd", {}, fmt(deal.amount, deal.currency)),
-            el("dt", {}, "Buyer pays"), el("dd", {}, fmt(q.buyerTotal, q.currency)),
-            el("dt", {}, "Valence fee"), el("dd", {}, `${fmt(q.platformFee, q.currency)} (1%, paid by the buyer)`),
-            el("dt", {}, "Card processing"), el("dd", {}, pay && pay.processorFee != null
+            el("dt", {}, "Buyer pays"), el("dd", {}, cryptoQuoteMode ? "Exact crypto amount from the deposit invoice" : fmt(q.buyerTotal, q.currency)),
+            el("dt", {}, "Valence fee"), el("dd", {}, cryptoQuoteMode ? "Exactly 1% of the crypto deal amount, paid by the buyer" : `${fmt(q.platformFee, q.currency)} (1%, paid by the buyer)`),
+            cryptoQuoteMode ? null : el("dt", {}, "Card processing"), cryptoQuoteMode ? null : el("dd", {}, pay && pay.processorFee != null
               ? `${fmt(pay.processorFee, q.currency)} (Stripe, paid by the seller)`
               : `about ${fmt(q.processorFee, q.currency)} (Stripe, paid by the seller)`),
-            el("dt", {}, "Seller receives"), el("dd", {}, pay && pay.sellerNet != null
+            el("dt", {}, "Seller receives"), el("dd", {}, cryptoQuoteMode ? "Crypto payout shown in the release quote" : pay && pay.sellerNet != null
               ? fmt(pay.sellerNet, q.currency)
               : `about ${fmt(q.sellerNet, q.currency)}`),
             el("dt", {}, "Refund deadline"), el("dd", {}, deal.deadlineAt ? when(deal.deadlineAt) : `${deal.deadlineHours} hours after payment`),
@@ -1883,7 +1887,9 @@
             el("dt", {}, "Deal ID"), el("dd", { class: "code" }, deal.id)),
           el("details", { class: "more" }, el("summary", {}, "History"),
             el("ul", { class: "timeline" }, deal.history.map((h) => el("li", {}, `${when(h.at)}: ${STATE_LABELS[h.state] || h.state} (by ${nameOf(h.by)})`))))),
-        el("p", { class: "dim" }, "The money is held by Stripe, never by Valence. ", el("a", { href: "#faq" }, "How this works"), "."));
+        cryptoQuoteMode
+          ? el("p", { class: "dim" }, "Crypto deposits are not open yet. Never send funds without a current deposit invoice for this deal.")
+          : el("p", { class: "dim" }, "The money is held by Stripe, never by Valence. ", el("a", { href: "#faq" }, "How this works"), "."));
     }
     draw();
 
@@ -1964,25 +1970,14 @@
       el("p", { class: "dim" }, "These are completed movements, past tense. Valence holds no balance for you: every payment belongs to one deal."));
   }
 
-  // Crypto checkout is planned through BTCPay Server. Until it's wired up this is a preview only:
-  // nothing here talks to the server or a wallet.
-  function cryptoPanel() {
-    const coin = (iconName, tone, name, sub) => el("li", { class: "tone-" + tone },
-      el("span", { class: "page-ico" }, icon(iconName)), el("div", {}, el("strong", {}, name), el("small", {}, sub)));
-    return el("div", { class: "crypto" },
-      el("div", { class: "crypto-head" },
-        el("div", {}, el("strong", {}, "Pay with crypto"), el("p", { class: "muted" }, "Checkout will run through BTCPay Server, so payments go straight to a wallet, with no exchange in the middle.")),
-        el("span", { class: "badge soon" }, "Coming soon")),
-      el("ul", { class: "crypto-coins" },
-        coin("bitcoin", "sunset", "Bitcoin", "On-chain"),
-        coin("bolt", "violet", "Lightning", "Instant, low fees")),
-      el("div", { class: "crypto-invoice", "aria-hidden": "true" },
-        el("div", { class: "qr-ph" }),
-        el("div", { class: "grow" },
-          el("span", { class: "ph-line w60" }), el("span", { class: "ph-line w90" }), el("span", { class: "ph-line w40" }))),
-      el("div", { class: "actions" },
-        el("button", { type: "button", class: "btn", disabled: true }, icon("bitcoin"), "Pay with crypto")),
-      el("p", { class: "dim" }, "Crypto isn't switched on yet. Choose Card to fund this deal today."));
+  function cryptoPanel(deal = null) {
+    const panel = el("div", { class: "crypto" });
+    if (!window.ValenceCryptoCheckout) {
+      put(panel, el("p", { class: "flash error" }, "Crypto checkout could not load. Reload the page before continuing."));
+      return panel;
+    }
+    window.ValenceCryptoCheckout.mount(panel, { request: api, dealId: deal && deal.id });
+    return panel;
   }
 
   // Shown on the payments page and in settings.
@@ -2569,3 +2564,4 @@
     else if (page === "signup") signupPage();
   }
 })();
+

@@ -3,6 +3,7 @@ const { clientIp, ipKey, bearer, sendJson, readJson, readRaw, limiter, quota } =
 const { createPow } = require("./pow");
 const { createSupport } = require("./support");
 const money = require("./money");
+const { cryptoMethods, refuseUnconfiguredInvoice } = require("./crypto-checkout");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
 
 const DEFAULT_INVITE = "https://discord.gg/eVYyxbyy22";
@@ -160,6 +161,17 @@ function createApi(store, opts = {}) {
   }));
 
   // ---- money ----
+  add("GET", "/crypto/methods", {}, () => ({ body: cryptoMethods() }));
+  add("POST", "/deals/:id/crypto/invoice", { auth: true, limit: payLimit }, ({ account, params, body }) => {
+    const deal = store.getDeal(account, params.id);
+    if (deal.yourRole !== "buyer") throw new ApiError(403, "not_buyer", "Only the buyer can request a deposit invoice");
+    if (!["joined", "awaiting_setup", "funding"].includes(deal.state)) {
+      throw new ApiError(409, "wrong_state", "This deal cannot accept a new deposit");
+    }
+    // Never return the owner's fee wallet as a deposit address. An address alone
+    // cannot identify a deal, detect confirmations, hold funds, or execute payouts.
+    refuseUnconfiguredInvoice(body.asset);
+  });
   //
   // None of these routes move money themselves. They ask Stripe to, and record what it did.
   const payments = opts.payments;
@@ -534,3 +546,4 @@ function createApi(store, opts = {}) {
 }
 
 module.exports = { createApi };
+

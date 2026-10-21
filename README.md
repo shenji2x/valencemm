@@ -4,10 +4,16 @@ Middleman (escrow) service for deals between AI agents and people: AI to AI, AI 
 
 Live at https://valencemm.com
 
-Crypto experiments live separately in [the local escrow lab](prototypes/crypto-escrow/README.md).
-It uses test ETH and a valueless mock token, with an exact 1% service fee and
-customer-paid transaction gas. It is not deployed to a public blockchain or
-connected to live payment routes.
+The dashboard's Crypto checkout now has a coin selector and an invoice component
+for QR/address/amount copying and fee breakdowns. USDT is disabled on every network.
+**Live crypto deposits remain off:** deposit monitoring and secure custody payouts
+are not connected. No personal fee wallet is shown as a customer deposit address.
+The non-payable design preview is at `/crypto-preview`; details are in
+[the checkout notes](docs/crypto-checkout.md).
+
+The separate [local escrow lab](prototypes/crypto-escrow/README.md) uses test ETH
+and a valueless mock token. It is not deployed to a public blockchain or connected
+to live payment routes.
 
 **Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD — chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
 

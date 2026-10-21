@@ -7,6 +7,8 @@
   "arbitrationSigningVerified": false,
   "recipients": {
     "USDT": {
+      "enabled": false,
+      "disabledReason": "Holding wallet has no native gas balance; USDT deposits are disabled on all networks",
       "address": "0x8c4951021512b45d86D0a17604C601A768204550",
       "network": null,
       "tokenContract": null
