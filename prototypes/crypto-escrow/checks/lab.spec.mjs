@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { before, after, test } from "node:test";
 import { startServer } from "../scripts/lab.mjs";
+import { Wallet } from "ethers";
 
 let running, state;
+const verificationWallet = Wallet.createRandom();
 before(async () => {
-  running = await startServer({ port: 0 });
+  running = await startServer({ port: 0, walletCheckAddress: verificationWallet.address });
   state = await (await fetch(running.url + "/api/state")).json();
 });
 after(async () => { await running?.close(); });
@@ -28,6 +30,27 @@ test("lab binds to loopback, clearly labels test money, and serves a restrictive
 test("mutation without the local session token is rejected", async () => {
   const response = await post("/api/reset", {}, { "X-Lab-Token": "" });
   assert.equal(response.status, 403);
+});
+
+test("wallet page is served, and challenge requires local session and origin checks", async () => {
+  const page = await fetch(running.url + "/verify-wallet");
+  assert.equal(page.status, 200); assert.match(await page.text(), /No deposit or gas/);
+  assert.equal((await post("/api/wallet-challenge", {}, { "X-Lab-Token": "" })).status, 403);
+  assert.equal((await post("/api/wallet-challenge", {}, { Origin: "https://example.com" })).status, 403);
+});
+
+test("HTTP wallet proof accepts the expected signer once without altering escrow", async () => {
+  const initial = await (await post("/api/wallet-status", {})).json();
+  assert.equal(initial.account, verificationWallet.address); assert.equal(initial.verified, false);
+  const payload = await (await post("/api/wallet-challenge", {})).json();
+  const signature = await verificationWallet.signTypedData(payload.domain, payload.types, payload.message);
+  const input = { nonce: payload.message.nonce, signature };
+  const response = await post("/api/wallet-verify", input);
+  assert.equal(response.status, 200); const result = await response.json();
+  assert.equal(result.verified, true); assert.equal(result.receipt.origin, running.url);
+  assert.equal((await post("/api/wallet-verify", input)).status, 400);
+  const current = await (await fetch(running.url + "/api/state")).json();
+  assert.deepEqual(current.deals, state.deals); assert.deepEqual(current.activity, state.activity);
 });
 
 test("cross-origin and cross-site mutations are rejected even with a token", async () => {

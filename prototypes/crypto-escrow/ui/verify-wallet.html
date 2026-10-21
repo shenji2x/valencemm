@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Valence - Check arbitration wallet</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/wallet-check.css"><script defer src="/wallet-check.js"></script></head>
+<body><header class="topbar"><a class="brand" href="/"><span class="brand-mark" aria-hidden="true">V</span> Valence<span class="brand-sub">Wallet check</span></a><span class="network">Sepolia test setup</span></header>
+<main><div class="intro"><div><p class="eyebrow">Connect your arbitration account</p><h1>Check your wallet.</h1><p class="lead">Prove you control the proposed signer with a one-time message. No deposit or gas is needed.</p></div></div>
+<aside class="notice"><strong>Verification only.</strong> This check cannot release funds or decide a dispute. It does not deploy escrow or enable live payments. Never enter your recovery phrase or private key here.</aside>
+<section class="panel"><h2>Your proposed arbitration wallet</h2><p id="expected" class="wallet-address">Loading...</p><p id="connection" class="hint">Open this page in Chrome or Edge with MetaMask installed.</p>
+<ol class="wallet-steps"><li>Connect MetaMask and select the account shown above.</li><li>Switch to Sepolia, a test network.</li><li>Review the test message below, then sign it in MetaMask.</li></ol>
+<div class="actions"><button id="connect-wallet">1. Connect MetaMask</button><button id="switch-network" disabled>2. Switch to Sepolia</button><button id="sign-check" disabled>3. Review test message</button></div>
+<div id="feedback" role="status" aria-live="polite"></div>
+<div id="message-review" hidden><h3>Message to sign</h3><p class="hint">The domain is Valence Wallet Check. The zero verifying-contract address means this is not a request to a deployed escrow contract.</p><pre id="message-fields" class="wallet-message"></pre><button id="confirm-sign">Sign this wallet check</button></div>
+<p class="hint">A successful check confirms wallet control and typed-data signing. A public Sepolia escrow trial is still required to test actual dispute decisions.</p></section><footer><a href="/">Back to the local escrow lab</a></footer></main></body></html>

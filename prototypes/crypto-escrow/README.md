@@ -26,6 +26,25 @@ server or resetting the demo creates a fresh local chain and loses its test data
 without a browser. `npm run compile` writes local Solidity artifacts. npm audit
 can check development dependencies; its result is not a smart-contract audit.
 
+## Check the proposed MetaMask signer
+
+With the local server running, open <http://127.0.0.1:8790/verify-wallet> in Chrome
+or Edge where MetaMask is installed. Connect the proposed arbitration account,
+switch to Sepolia using the page's button, review the test message, and approve
+the message signature in MetaMask. No ETH balance, gas, transfer or approval is
+needed. Never enter a private key or recovery phrase into the page.
+
+The server verifies EIP-712 signatures against the configured proposed address.
+Messages expire after five minutes, bind the loopback origin and a random nonce,
+and cannot be replayed after verification. The domain is `Valence Wallet Check`,
+the message type is `WalletCheck`, and the verifying-contract address is zero;
+this is deliberately separate from the escrow's `Resolution` signatures. The
+result proves wallet control and typed-data signing in this running local
+session only. It does not change the recorded configuration flags, authenticate
+a live site account, deploy a contract, or verify an actual arbitration decision.
+Restarting the server clears the verification result. A public Sepolia escrow
+trial and production security work remain necessary.
+
 ## Assets and network boundaries
 
 | Asset | Prototype status |

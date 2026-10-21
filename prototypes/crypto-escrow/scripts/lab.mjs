@@ -4,11 +4,15 @@ import path from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createLab } from "./local.mjs";
+import { createWalletCheck } from "./wallet-check.mjs";
 
 const files = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/app.js", ["app.js", "text/javascript; charset=utf-8"]],
-  ["/style.css", ["style.css", "text/css; charset=utf-8"]]
+  ["/style.css", ["style.css", "text/css; charset=utf-8"]],
+  ["/verify-wallet", ["verify-wallet.html", "text/html; charset=utf-8"]],
+  ["/wallet-check.css", ["wallet-check.css", "text/css; charset=utf-8"]],
+  ["/wallet-check.js", ["wallet-check.js", "text/javascript; charset=utf-8"]]
 ]);
 const publicRoot = fileURLToPath(new URL("../ui/", import.meta.url));
 async function body(req) {
@@ -22,7 +26,9 @@ async function body(req) {
   return value;
 }
 
-export async function startServer({ port = 8790 } = {}) {
+export async function startServer({ port = 8790, walletCheckAddress } = {}) {
+  const config = JSON.parse(await fs.readFile(new URL("../config/fee-recipients.json", import.meta.url), "utf8"));
+  const walletCheck = createWalletCheck(walletCheckAddress || config.arbitrator);
   let lab = await createLab();
   await lab.fund("TESTUSD", "100");
   const token = randomBytes(32).toString("hex");
@@ -53,7 +59,7 @@ export async function startServer({ port = 8790 } = {}) {
         await queue;
         return send(200, { ...await lab.state(), token });
       }
-      if (req.method !== "POST" || !["/api/fund", "/api/action", "/api/time", "/api/reset"].includes(url.pathname)) {
+      if (req.method !== "POST" || !["/api/fund", "/api/action", "/api/time", "/api/reset", "/api/wallet-status", "/api/wallet-challenge", "/api/wallet-verify"].includes(url.pathname)) {
         return send(404, { error: "Not found" });
       }
       if (req.headers.origin && !hosts.some(host => req.headers.origin === `http://${host}`)) {
@@ -66,6 +72,10 @@ export async function startServer({ port = 8790 } = {}) {
       }
       if (!req.headers["content-type"]?.startsWith("application/json")) return send(415, { error: "JSON required" });
       const input = await body(req);
+      const origin = `http://${req.headers.host}`;
+      if (url.pathname === "/api/wallet-status") return send(200, walletCheck.status());
+      if (url.pathname === "/api/wallet-challenge") return send(200, walletCheck.challenge(origin));
+      if (url.pathname === "/api/wallet-verify") return send(200, walletCheck.verify(origin, input.nonce, input.signature));
       const operation = queue.then(async () => {
         if (url.pathname === "/api/fund") await lab.fund(input.asset, input.amount);
         if (url.pathname === "/api/action") await lab.act(input.id, input.action);
@@ -105,6 +115,6 @@ export async function startServer({ port = 8790 } = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const running = await startServer();
   console.log(`Valence escrow lab: ${running.url}`);
-  console.log("LOCAL TEST MONEY ONLY. All roles are simulated. No public RPC, wallet connection or billing.");
+  console.log("LOCAL TEST MONEY ONLY. Escrow roles are simulated. Optional MetaMask message check: /verify-wallet. No public deployment or billing.");
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => { await running.close(); process.exit(0); });
 }
