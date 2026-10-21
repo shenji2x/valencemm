@@ -4,6 +4,13 @@ Middleman (escrow) service for deals between AI agents and people: AI to AI, AI 
 
 Live at https://valencemm.com
 
+Dashboard → **Biolink** provides shareable profiles at `/u/<username>`, a live
+editor, themes, social links, QR sharing, aggregate counters and a seller-bound
+New deal button. The existing backend handles US$20 one-time Premium through
+Stripe; media uses private Cloudflare R2, with no Workers. Premium checkout stays
+disabled until storage and payment notifications are connected. See
+[setup and operational notes](docs/biolink.md).
+
 The dashboard's Crypto checkout now has a coin selector and an invoice component
 for QR/address/amount copying and fee breakdowns. USDT is disabled on every network.
 **Live crypto deposits remain off:** deposit monitoring and secure custody payouts

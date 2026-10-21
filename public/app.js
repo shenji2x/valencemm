@@ -69,6 +69,7 @@
 
   // Small fixed icon set (static paths, never user data).
   const ICONS = {
+    biolink: 'M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2',
     overview: "M3 20h18M4 16l5-5 4 3 4.2-4.8M17.6 7.2a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0",
     stats: "M3 20h18M6 20v-5M11 20V9M16 20v-6M17.2 5.6a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0 -3.2 0",
     new: "M20.83 10.28A9 9 0 1 1 13.72 3.17M16.66 5.636038969321072a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0M12 8v8M8 12h8",
@@ -910,6 +911,7 @@
     deals: { title: "Active deals", icon: "deals", render: viewActive },
     history: { title: "Past deals", icon: "history", render: viewHistory },
     payments: { title: "Payments", icon: "wallet", render: viewPayments },
+    biolink: { title: 'Biolink', icon: 'biolink', render: (view, _arg, gen) => window.ValenceBiolink.renderEditor(view, { api, flash, alive: () => alive(gen) }) },
     deal: { title: "Deal", icon: "deals", nav: "deals", render: viewDeal, slim: true },
     support: { title: "Support", icon: "support", render: viewSupport },
     ticket: { title: "Support ticket", icon: "support", nav: "support", render: viewTicket, slim: true },
@@ -1359,10 +1361,21 @@
   // A card hold lasts about 7 days, so a deal can never promise longer than that.
   const DEADLINES = [[12, "12 hours"], [24, "1 day"], [48, "2 days"], [72, "3 days"], [168, "7 days"]];
 
-  function viewNewDeal(view) {
+  async function viewNewDeal(view, sellerHandle, gen) {
     const draft = { type: null, role: null, title: "", description: "", amount: "", paymentType: "stripe", cryptoAsset: "BTC", deadlineHours: 72, key: newKey() };
+    let profileSeller = null;
+    if (sellerHandle) {
+      profileSeller = (await api('GET', '/profiles/' + encodeURIComponent(sellerHandle))).profile;
+      if (!alive(gen)) return;
+      draft.sellerHandle = profileSeller.handle;
+      draft.role = 'buyer';
+      draft.type = app.me.kind === profileSeller.kind ? (app.me.kind === 'human' ? 'human-human' : 'ai-ai') : 'ai-human';
+      // The backend also checks the profile owner's actual account kind.
+      draft.title = 'Deal with ' + profileSeller.displayName;
+      put(view, el('p', { class: 'flash' }, 'You are starting a deal with @' + profileSeller.handle + '. Only this profile owner can join as the seller.'));
+    }
     const STEPS = ["Who", "What", "How much", "Review"];
-    let step = 0;
+    let step = profileSeller ? 1 : 0;
     const body = el("div", { class: "card" });
     put(view, body);
 
@@ -1509,6 +1522,7 @@
               type: draft.type, role: draft.role, title: draft.title, description: draft.description,
               amount: n, deadlineHours: draft.deadlineHours, currency: draft.currency,
               paymentType: draft.paymentType, ...(crypto ? { cryptoAsset: draft.cryptoAsset } : {}),
+              ...(draft.sellerHandle ? { sellerHandle: draft.sellerHandle } : {}),
             }, { headers: { "Idempotency-Key": draft.key } });
             location.hash = "#deal/" + encodeURIComponent(deal.id);
           } catch (err) {

@@ -58,7 +58,7 @@ class StripeError extends Error {
   }
 }
 
-function createStripe({ secretKey, webhookSecret, apiBase = API, fetchImpl = fetch, log = console } = {}) {
+function createStripe({ secretKey, webhookSecret, premiumWebhookSecret, apiBase = API, fetchImpl = fetch, log = console } = {}) {
   const mode = secretKey ? "live" : "off";
 
   async function request(method, path, params, { stripeAccount, idempotencyKey } = {}) {
@@ -96,6 +96,7 @@ function createStripe({ secretKey, webhookSecret, apiBase = API, fetchImpl = fet
       return mode === "live";
     },
     acceptsWebhooks: Boolean(webhookSecret),
+    acceptsPremiumWebhooks: Boolean(premiumWebhookSecret || webhookSecret),
     request,
 
     // ---- the seller's own Stripe account ----
@@ -172,8 +173,9 @@ function createStripe({ secretKey, webhookSecret, apiBase = API, fetchImpl = fet
     },
 
     // Stripe signs every webhook. An unsigned or stale one is not from Stripe.
-    verifyWebhook(rawBody, signatureHeader, { now = Date.now() } = {}) {
-      if (!webhookSecret) return { ok: false, reason: "no_webhook_secret" };
+    verifyWebhook(rawBody, signatureHeader, { now = Date.now(), premium = false } = {}) {
+      const signingSecret = premium ? premiumWebhookSecret || webhookSecret : webhookSecret;
+      if (!signingSecret) return { ok: false, reason: "no_webhook_secret" };
       if (typeof signatureHeader !== "string" || !signatureHeader) return { ok: false, reason: "no_signature" };
       const parts = new Map(signatureHeader.split(",").map((p) => {
         const i = p.indexOf("=");
@@ -183,7 +185,7 @@ function createStripe({ secretKey, webhookSecret, apiBase = API, fetchImpl = fet
       const given = parts.get("v1");
       if (!timestamp || !given) return { ok: false, reason: "malformed_signature" };
       if (Math.abs(now - Number(timestamp) * 1000) > WEBHOOK_TOLERANCE_MS) return { ok: false, reason: "stale" };
-      const expected = crypto.createHmac("sha256", webhookSecret)
+      const expected = crypto.createHmac("sha256", signingSecret)
         .update(`${timestamp}.${Buffer.isBuffer(rawBody) ? rawBody.toString("utf8") : rawBody}`)
         .digest("hex");
       const a = Buffer.from(expected, "utf8");
@@ -208,9 +210,11 @@ function stripeFromEnv(overrides = {}) {
   return createStripe({
     secretKey: process.env.STRIPE_SECRET_KEY || null,
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || null,
+    premiumWebhookSecret: process.env.STRIPE_PREMIUM_WEBHOOK_SECRET || null,
     publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || null,
     ...overrides,
   });
 }
 
 module.exports = { createStripe, stripeFromEnv, StripeError, encode };
+
