@@ -9,7 +9,7 @@ It uses test ETH and a valueless mock token, with an exact 1% service fee and
 customer-paid transaction gas. It is not deployed to a public blockchain or
 connected to live payment routes.
 
-**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD - chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
+**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD — chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
 
 ## Run it locally
 

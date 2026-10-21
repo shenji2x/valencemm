@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Valence � Escrow lab</title>
+  <title>Valence · Escrow lab</title>
   <link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script>
 </head>
 <body>
@@ -12,19 +12,19 @@
     <div class="intro"><div><p class="eyebrow">A place to test the deal</p><h1>One deal. One clear fee.</h1><p class="lead">Funds stay locked until release or refund. Your service fee is 1%; customers cover network fees.</p></div><button id="reset" class="quiet">Reset demo</button></div>
     <aside class="notice"><strong>Test money only.</strong> This local demo simulates the buyer, seller and Valence arbitrator. TESTUSD is a mock token, not real USDT. No customer funds or live website accounts are connected.</aside>
     <div id="feedback" role="status" aria-live="polite"></div>
-    <section class="summary" aria-label="Demo totals"><div><span>Locked in active deals</span><strong id="locked">-</strong><small>TESTUSD principal</small></div><div><span>Valence fee earned</span><strong id="earned">-</strong><small>TESTUSD � 1% on released deals</small></div><div><span>Processing commission</span><strong>0%</strong><small>Local demo � network gas is separate</small></div></section>
+    <section class="summary" aria-label="Demo totals"><div><span>Locked in active deals</span><strong id="locked">—</strong><small>TESTUSD principal</small></div><div><span>Valence fee earned</span><strong id="earned">—</strong><small>TESTUSD · 1% on released deals</small></div><div><span>Processing commission</span><strong>0%</strong><small>Local demo · network gas is separate</small></div></section>
     <div class="workspace">
       <section class="panel"><div class="section-title"><h2>Start a test deal</h2><span class="subtle">Buyer</span></div>
-        <form id="fund-form"><label for="asset">Test asset</label><select id="asset" name="asset"><option value="TESTUSD">TESTUSD � mock dollar</option><option value="ETH">Test ETH</option></select>
+        <form id="fund-form"><label for="asset">Test asset</label><select id="asset" name="asset"><option value="TESTUSD">TESTUSD · mock dollar</option><option value="ETH">Test ETH</option></select>
           <label for="amount">Seller receives</label><div class="amount-wrap"><input id="amount" name="amount" inputmode="decimal" value="100" required autocomplete="off" aria-describedby="amount-hint"><span id="amount-unit">TESTUSD</span></div>
           <p class="hint" id="amount-hint">Use up to 4 decimal places for an exact 1% fee.</p>
-          <div class="quote"><div><span>Deal principal</span><strong id="quote-principal">100</strong></div><div><span>Valence fee � 1%</span><strong id="quote-fee">1</strong></div><div class="quote-total"><span>Buyer deposits</span><strong id="quote-total">101 TESTUSD</strong></div><p>Gas is paid separately by whoever submits each transaction. The buyer can pay gas to collect Valence's fee.</p></div>
+          <div class="quote"><div><span>Deal principal</span><strong id="quote-principal">100</strong></div><div><span>Valence fee · 1%</span><strong id="quote-fee">1</strong></div><div class="quote-total"><span>Buyer deposits</span><strong id="quote-total">101 TESTUSD</strong></div><p>Gas is paid separately by whoever submits each transaction. The buyer can pay gas to collect Valence’s fee.</p></div>
           <button type="submit" class="primary" id="fund">Fund test deal</button>
         </form><div class="terms"><h3>Rules for this demo</h3><p>The seller has 24 hours to deliver. A timely delivery starts a 72-hour review period. A dispute freezes settlement until Valence resolves it.</p><p>A full refund returns the principal and the 1% fee. Gas already spent is not refunded.</p></div>
       </section>
-      <section class="panel deals-panel"><div class="section-title"><h2>Your test deals</h2><span id="deal-count" class="subtle">-</span></div><div id="deals" aria-live="polite"></div></section>
+      <section class="panel deals-panel"><div class="section-title"><h2>Your test deals</h2><span id="deal-count" class="subtle">—</span></div><div id="deals" aria-live="polite"></div></section>
     </div>
     <section class="panel activity-panel"><div class="section-title"><div><h2>Transaction activity</h2><p class="hint">These are executed on a local EVM. Every entry names the role paying gas.</p></div><details><summary>Local clock controls</summary><p>Fast-forward time to exercise deadlines and review periods.</p><button data-seconds="86401" class="quiet">Advance 24 hours</button><button data-seconds="259201" class="quiet">Advance 72 hours</button></details></div><div class="table-scroll"><table><caption class="sr-only">Local transactions and simulated gas costs</caption><thead><tr><th scope="col">Action</th><th scope="col">Gas paid by</th><th scope="col">Test ETH used</th><th scope="col">Transaction</th></tr></thead><tbody id="activity"></tbody></table></div></section>
-    <footer>Local prototype � chain 31337 � no real assets � no public blockchain deployment</footer>
+    <footer>Local prototype · chain 31337 · no real assets · no public blockchain deployment</footer>
   </main>
 </body></html>

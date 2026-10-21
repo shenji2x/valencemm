@@ -17,7 +17,7 @@ async function request(path, data) {
 }
 async function mutate(path, data, message) {
   if (busy) return;
-  locking(true); feedback("Confirming on the local test network.");
+  locking(true); feedback("Confirming on the local test network…");
   try { model = await request(path, data); render(); feedback(message); }
   catch (e) { feedback(e.message, true); }
   finally { locking(false); }
@@ -38,7 +38,7 @@ function render() {
     const head = el("div", null, "deal-head"); head.append(el("h3", `Deal ${String(d.number).padStart(2, "0")}`),
       el("span", d.state, `badge ${["Released", "Refunded"].includes(d.state) ? "final" : d.state === "Disputed" ? "disputed" : ""}`));
     const value = el("div", compact(d.principal) + " ", "deal-value"); value.append(el("span", d.symbol));
-    card.append(head, value, el("p", `Buyer deposits ${compact(d.total)} � Valence fee ${compact(d.fee)} ${d.symbol}`, "deal-info"));
+    card.append(head, value, el("p", `Buyer deposits ${compact(d.total)} · Valence fee ${compact(d.fee)} ${d.symbol}`, "deal-info"));
     const actions = el("div", null, "actions");
     if (["Funded", "Delivered"].includes(d.state)) {
       actions.append(button("release", d, "positive"), button("refund", d, "refund"));
@@ -55,12 +55,12 @@ function render() {
       Funded: "Funds are locked. The buyer can release, or the seller can refund.",
       Delivered: "The buyer has 72 hours to review or open a dispute. A dispute stops automatic release.",
       Disputed: "Settlement is frozen. Valence signs a decision; a customer submits it and pays the network gas.",
-      Released: "The seller's principal and Valence's 1% are available to collect separately.",
+      Released: "The seller’s principal and Valence’s 1% are available to collect separately.",
       Refunded: "The buyer can collect the principal and the full service fee. Previously spent gas is not refundable."
     }[d.state];
     card.append(el("p", note, "deal-note"), actions);
     if (["Released", "Refunded"].includes(d.state)) {
-      card.append(el("p", `Available to collect: buyer ${compact(d.claims.buyer)} � seller ${compact(d.claims.seller)} � Valence ${compact(d.claims.treasury)} ${d.symbol}`, "claims"));
+      card.append(el("p", `Available to collect: buyer ${compact(d.claims.buyer)} · seller ${compact(d.claims.seller)} · Valence ${compact(d.claims.treasury)} ${d.symbol}`, "claims"));
     }
     $("deals").append(card);
   }
@@ -69,7 +69,7 @@ function render() {
     const row = el("tr"); const wei = BigInt(a.gasWei);
     const fraction = (wei % 1000000000000000000n).toString().padStart(18, "0").replace(/0+$/, "");
     const gas = `${wei / 1000000000000000000n}${fraction ? "." + fraction : ""}`;
-    const tx = el("td"); const code = el("code", a.hash.slice(0, 10) + "." + a.hash.slice(-6)); code.title = a.hash; tx.append(code);
+    const tx = el("td"); const code = el("code", a.hash.slice(0, 10) + "…" + a.hash.slice(-6)); code.title = a.hash; tx.append(code);
     row.append(el("td", labels[a.label] || a.label), el("td", a.role === "treasury" ? "Valence" : a.role), el("td", gas), tx);
     $("activity").append(row);
   }
@@ -83,7 +83,7 @@ function quote() {
   let valid = new RegExp(`^\\d{1,7}(\\.\\d{1,${maxDecimals}})?$`).test(raw) && Number(raw) > 0;
   if (!valid) {
     $("amount").setCustomValidity(`Enter a positive amount with up to ${maxDecimals} decimal places.`);
-    $("quote-principal").textContent = $("quote-fee").textContent = $("quote-total").textContent = "-"; return;
+    $("quote-principal").textContent = $("quote-fee").textContent = $("quote-total").textContent = "—"; return;
   }
   // Exact integer decimal arithmetic; no floating-point amounts are sent to the contract.
   const decimals = asset === "ETH" ? 18 : 6, [whole, fraction = ""] = raw.split(".");
