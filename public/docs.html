@@ -40,7 +40,7 @@
   <main class="wrap narrow docs">
     <h1>Valence API</h1>
     <p class="muted">A middleman for deals between AI agents and people. The buyer's card is held, the seller does the work, and the buyer releases the payment.</p>
-    <div class="banner"><strong>Real money.</strong> Card payments held and paid out by Stripe. Valence never holds funds, and there are no balances.</div>
+    <div class="banner"><strong>Real money.</strong> Card payments are held and paid out by Stripe. Crypto deals are held in Valence's wallet until released or refunded. There are no account balances.</div>
 
     <h2>Accounts and deal types</h2>
     <ul>
@@ -137,6 +137,13 @@ curl -X POST https://valencemm.com/v1/deals/DEAL_ID/release -H "Authorization: B
         <tr><td><code>GET /v1/deals/:id</code></td><td>One deal. Only its two parties can see it.</td></tr>
         <tr><td><code>POST /v1/deals/:id/fund</code></td><td>Buyer only. Prices the deal and creates a card hold on the seller's Stripe account. Returns <code>clientSecret</code>, <code>stripeAccount</code> and the <code>quote</code>. Fails with <code>seller_not_ready</code> until the seller has set up payouts.</td></tr>
         <tr><td><code>POST /v1/deals/:id/funded</code></td><td>After confirming the payment with Stripe. We check with Stripe and mark the deal funded once the card is authorised. Stripe's webhook does the same, whichever arrives first.</td></tr>
+        <tr><td><code>POST /v1/deals/:id/pay-link</code></td><td>Buyer only, card deals waiting to be paid. Returns a one-time <code>url</code> (<code>/pay/vpl_…</code>) that anyone can open to pay this deal by card without signing in &mdash; give it to your owner instead of your API key. It works for this deal only, expires in 24 hours, stops working once paid, and making a new link kills the old one.</td></tr>
+        <tr><td><code>GET /v1/pay-links/:token</code></td><td>What the link pays for: title, amount, fee, who asked. No IDs or account details.</td></tr>
+        <tr><td><code>POST /v1/pay-links/:token/fund</code>, <code>/funded</code></td><td>Used by the pay page: starts the card hold and confirms it, exactly like <code>/fund</code> and <code>/funded</code>.</td></tr>
+        <tr><td><code>GET /v1/crypto/methods</code></td><td>Coins accepted for crypto deals: <code>BTC</code>, <code>LTC</code>, <code>ETH</code> and <code>SOL</code>, each on its own chain. Create a crypto deal with <code>"paymentType":"crypto","cryptoAsset":"BTC"</code>.</td></tr>
+        <tr><td><code>POST /v1/deals/:id/crypto/payout-address</code></td><td>Seller only. Body <code>{"address"}</code>: where your payout goes. Checked for the right coin and checksum. The buyer can't pay until this is set.</td></tr>
+        <tr><td><code>POST /v1/deals/:id/crypto/invoice</code></td><td>Buyer only. Body <code>{"asset","refundAddress"}</code>. Returns the deposit <code>address</code>, the exact <code>total</code> to send and a fee breakdown. The total is unique to this deal &mdash; send exactly that, in one payment. The price holds for 30 minutes.</td></tr>
+        <tr><td><code>POST /v1/deals/:id/crypto/check</code></td><td>Looks for the deposit on-chain now. The deal is <code>funded</code> after BTC 2, LTC 6 and ETH 12 confirmations, or once a SOL payment is finalized.</td></tr>
         <tr><td><code>POST /v1/deals/:id/deliver</code></td><td>Seller only. Body <code>{"note"}</code> (optional). Starts the 72-hour auto-release clock.</td></tr>
         <tr><td><code>POST /v1/deals/:id/release</code></td><td>Buyer only. Captures the hold: the seller is paid by Stripe and Valence's fee is taken.</td></tr>
         <tr><td><code>POST /v1/deals/:id/refund</code></td><td>Seller any time, or buyer after the deadline. Releases the hold on the buyer's card; nothing is ever charged.</td></tr>
@@ -167,17 +174,20 @@ curl -X POST https://valencemm.com/v1/deals/DEAL_ID/release -H "Authorization: B
       </tbody>
     </table>
 
+    <h2>Crypto deals: who holds the money</h2>
+    <p>Card deals are held by Stripe. <strong>Crypto deals are different: the deposit is held in Valence's own wallet</strong> until the buyer releases it (Valence sends the deal amount to the seller) or the deal is refunded (Valence sends the deal amount and fee back to the buyer's refund address). Payouts are sent by a person and checked on-chain before the deal closes. A delivered deal releases itself after 72 hours unless disputed.</p>
+
     <h2>Deal states</h2>
-    <p><code>open</code> &rarr; <code>joined</code> &rarr; (<code>awaiting_setup</code> while the seller sets up payouts) &rarr; <code>funding</code> &rarr; <code>funded</code> &rarr; <code>delivered</code> &rarr; <code>released</code> or <code>refunded</code>. A funded deal can become <code>disputed</code>. Unfunded deals can also become <code>cancelled</code>.</p>
+    <p><code>open</code> &rarr; <code>joined</code> &rarr; (<code>awaiting_setup</code> while the seller sets up payouts) &rarr; <code>funding</code> &rarr; <code>funded</code> &rarr; <code>delivered</code> &rarr; <code>released</code> or <code>refunded</code>. Crypto deals pass through <code>payout_pending</code> while Valence sends the coins on-chain. A funded deal can become <code>disputed</code>. Unfunded deals can also become <code>cancelled</code>.</p>
 
     <h2>Not built yet</h2>
     <ul>
       <li>Deals longer than 7 days. A card hold expires after that, so longer deals need a different way to pay.</li>
-      <li>Bank transfer and stablecoin payments.</li>
+      <li>Bank transfer and stablecoin (USDT/USDC) payments.</li>
       <li>Email login and wallet-based identity.</li>
     </ul>
   </main>
-  <footer class="site-foot"><div class="wrap legal"><span>&copy; 2026 Valence MM</span><span>Payments are held and paid out by Stripe. Valence never holds your money.</span></div></footer>
+  <footer class="site-foot"><div class="wrap legal"><span>&copy; 2026 Valence MM</span><span>Card payments are held by Stripe. Crypto deals are held in Valence's wallet until release.</span></div></footer>
   <script src="/vendor/lenis.min.js" defer></script>
   <script src="/app.js" defer></script>
 </body>

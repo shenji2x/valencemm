@@ -8,13 +8,16 @@ const ASSETS = Object.freeze([
   { symbol: "USDT", name: "Tether", network: "All networks", decimals: 6 }
 ]);
 const USDT_REASON = "USDT is temporarily disabled. The holding wallet needs its network's native gas coin (such as ETH or BNB) for outgoing transfers.";
-function cryptoMethods() {
+const NOT_READY = "Crypto deposits are not open yet. Deposit tracking and secure release/refund payouts must be connected before a payment address can be issued.";
+// `ready` is true once the server has the owner's deposit wallets and can watch the chains.
+function cryptoMethods({ ready = false, wallets = {} } = {}) {
   return {
-    ready: false,
-    reason: "Crypto deposits are not open yet. Deposit tracking and secure release/refund payouts must be connected before a payment address can be issued.",
+    ready,
+    reason: ready ? null : NOT_READY,
+    custody: ready ? "Crypto deals are held in Valence's wallet until release. Payouts are sent by Valence and verified on the blockchain." : null,
     platformBps: 100,
     releaseRecipient: "seller", refundRecipient: "buyer",
-    assets: ASSETS.map(a => ({ ...a, disabled: a.symbol === "USDT", reason: a.symbol === "USDT" ? USDT_REASON : null,
+    assets: ASSETS.map(a => ({ ...a, disabled: a.symbol === "USDT" || (ready && !wallets[a.symbol]), reason: a.symbol === "USDT" ? USDT_REASON : ready && !wallets[a.symbol] ? "Not available right now." : null,
       releaseFeeAcknowledgementRequired: true }))
   };
 }
@@ -56,7 +59,13 @@ function nativeBreakdown({ symbol, principalAtomic, payoutReserveAtomic }) {
 }
 function refuseUnconfiguredInvoice(symbol) {
   enabledAsset(symbol);
-  throw new ApiError(503, "crypto_not_ready", cryptoMethods().reason);
+  throw new ApiError(503, "crypto_not_ready", NOT_READY);
+}
+// "412387" (atomic units of BTC) -> "0.00412387"
+function coinAmount(atomic, symbol) {
+  const asset = ASSETS.find(a => a.symbol === symbol);
+  if (!asset) throw new Error(`Unknown coin ${symbol}`);
+  return decimal(BigInt(atomic), asset.decimals);
 }
 // The agreed rail is immutable. Only these fields are accepted from a new deal;
 // destinations, exchange rates, fees and payment state are never client supplied.
@@ -83,4 +92,4 @@ function requireCryptoDeal(deal, symbol) {
   enabledAsset(symbol);
   if (deal.rail !== "crypto" || deal.cryptoAsset !== symbol) throw new ApiError(409, "payment_type_mismatch", "Use the payment type and coin agreed when this deal was created");
 }
-module.exports = { cryptoMethods, nativeBreakdown, refuseUnconfiguredInvoice, paymentSelection, requireCardDeal, requireCryptoDeal };
+module.exports = { ASSETS, cryptoMethods, nativeBreakdown, refuseUnconfiguredInvoice, paymentSelection, requireCardDeal, requireCryptoDeal, coinAmount, enabledAsset };

@@ -6,7 +6,9 @@
     const n = document.createElement(tag); if (text !== undefined && text !== null) n.textContent = text;
     if (className) n.className = className; return n;
   }
-  function mount(host, { request, dealId = null, asset: agreedAsset = null }) {
+  // refundAddress: optional function returning where a refund should go. When given, no invoice is
+  // requested until it returns something.
+  function mount(host, { request, dealId = null, asset: agreedAsset = null, refundAddress = null }) {
     let generation = 0, selected, disposed = false, expiryTimer;
     const title = node("div", null, "cc-heading");
     title.append(node("div", "Pay with crypto", "cc-title"), node("span", "1% Valence fee", "badge"));
@@ -14,7 +16,7 @@
     const choices = node("div", null, "cc-choices"); choices.setAttribute("role", "group"); choices.setAttribute("aria-label", "Cryptocurrency");
     const notice = node("p", "Loading payment methods...", "hint"); notice.setAttribute("role", "status");
     const content = node("div");
-    const lifecycle = node("p", "After a confirmed deposit, funds stay held for the deal. Release pays the seller; a refund returns funds to the buyer. The payout network fee is reviewed before either payout.", "hint");
+    const lifecycle = node("p", "Once the deposit is confirmed on the blockchain it's held in Valence's wallet for this deal. Release: Valence sends the deal amount to the seller. Refund: Valence returns the deal amount and fee to your refund address.", "hint");
     host.replaceChildren(title, subtitle, choices, notice, content, lifecycle);
     const clear = () => { clearInterval(expiryTimer); content.replaceChildren(); };
     function copyControl(label, text) {
@@ -57,7 +59,8 @@
         ["Swap fee - no swap for this quote", invoice.fees.swap], ["Payout network fee reserve (estimate)", invoice.fees.payoutReserve], ["Total deposit", invoice.total]]) {
         fees.append(node("dt", label), node("dd", `${value} ${invoice.asset}`));
       }
-      card.append(fees, node("p", "The sending wallet charges its network fee separately. Make sure the full deposit amount arrives; do not subtract that fee from this amount.", "hint"),
+      card.append(fees, node("p", "Send the exact amount, in one payment. The amount is unique to this deal, which is how the payment is matched to it. If your exchange takes its fee out of the amount sent, it won't match: send from a wallet, or add the fee on top.", "flash warn"),
+        node("p", "The sending wallet charges its network fee separately. Make sure the full deposit amount arrives; do not subtract that fee from this amount.", "hint"),
         node("p", "Deposit and payout use the same coin and network. No swap is included. Any later conversion needs a separate quote and your approval.", "hint"));
       const countdown = node("p", "", "cc-expiry"); card.append(countdown);
       const controls = node("div", null, "actions"); const refresh = node("button", "Refresh quote", "btn secondary"); refresh.type = "button";
@@ -74,9 +77,14 @@
       const current = ++generation; selected = asset; clear();
       for (const button of choices.querySelectorAll("button")) button.setAttribute("aria-pressed", String(button.dataset.asset === asset));
       if (!dealId) { content.append(node("p", "Open a joined deal as the buyer to request its deposit invoice.", "hint")); return; }
+      const refund = typeof refundAddress === "function" ? String(refundAddress() || "").trim() : "";
+      if (refundAddress && !refund) {
+        content.replaceChildren(node("p", "Add your refund address above, then press Get deposit address.", "hint"));
+        return;
+      }
       content.append(node("p", "Preparing your deposit quote...", "muted"));
       try {
-        const invoice = await request("POST", `/deals/${encodeURIComponent(dealId)}/crypto/invoice`, { asset });
+        const invoice = await request("POST", `/deals/${encodeURIComponent(dealId)}/crypto/invoice`, refund ? { asset, refundAddress: refund } : { asset });
         if (!disposed && current === generation && host.isConnected) renderInvoice(invoice);
       } catch (error) {
         if (!disposed && current === generation) {
@@ -98,7 +106,10 @@
       }
       const initial = policy.assets.find(a => !a.disabled && (!agreedAsset || a.symbol === agreedAsset)); if (initial) load(initial.symbol);
     }).catch(error => { notice.textContent = error.message || "Could not load payment methods"; });
-    return { destroy() { disposed = true; generation++; clearInterval(expiryTimer); } };
+    return {
+      destroy() { disposed = true; generation++; clearInterval(expiryTimer); },
+      reload() { if (selected) load(selected); },
+    };
   }
   window.ValenceCryptoCheckout = { mount };
 })();

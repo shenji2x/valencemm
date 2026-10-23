@@ -1081,3 +1081,19 @@ details.more[open] summary::after { transform: translateY(1px) rotate(225deg); }
   .tilt { transform: none !important; }
   .tilt-glare { display: none; }
 }
+
+/* crypto deals, pay links and the owner payout queue */
+.badge.live { color: var(--ok); background: var(--ok-soft); border-color: transparent; }
+.addr-form, .crypto-pay { display: grid; gap: 8px; margin: 10px 0 4px; }
+.addr-form .btn, .crypto-pay .actions .btn { margin-top: 4px; justify-self: start; }
+code.addr, .paylink-url { font-family: var(--mono); font-size: .86rem; word-break: break-all; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; }
+.paylink-box { margin-top: 8px; display: grid; gap: 8px; }
+.paylink-box .row { align-items: center; flex-wrap: wrap; }
+.paylink .review { margin: 18px 0; }
+.paylink .btn.block { margin-top: 12px; }
+.owner { display: grid; gap: 18px; }
+.owner-sec h2 { margin-bottom: 6px; }
+.owner-item { border-top: 1px solid var(--line); padding: 14px 0; display: grid; gap: 8px; }
+.owner-item:first-of-type { border-top: 0; }
+.owner-item .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.owner-item input { flex: 1; min-width: 220px; }

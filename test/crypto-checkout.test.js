@@ -44,8 +44,8 @@ test("each native asset formats in its own atomic precision", () => {
   assert.equal(nativeBreakdown({ symbol: "LTC", principalAtomic: "100000000", payoutReserveAtomic: "1000" }).total, "1.01001");
 });
 
-test("HTTP checkout refuses deposits without changing card state or exposing owner addresses", async () => {
-  const server = createApp({ skipTimers: true, powDifficulty: 0 });
+test("with no deposit wallets configured, HTTP checkout refuses deposits without changing card state or exposing owner addresses", async () => {
+  const server = createApp({ skipTimers: true, powDifficulty: 0, wallets: {} });
   await server.ready;
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;

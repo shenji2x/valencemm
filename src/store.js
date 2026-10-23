@@ -7,7 +7,8 @@ const { promisify } = require("util");
 const { ApiError } = require("./errors");
 const sec = require("./security");
 const money = require("./money");
-const { paymentSelection, requireCardDeal } = require("./crypto-checkout");
+const { paymentSelection, requireCardDeal, requireCryptoDeal, coinAmount } = require("./crypto-checkout");
+const { checkAddress } = require("./wallets");
 const { reservedUsername, weakPassword } = require("./policy");
 const profiles = require('./profiles');
 
@@ -27,7 +28,8 @@ const PALETTES = ["blue", "teal", "violet", "emerald", "sunset", "graphite"];
 const HOUR_MS = 3600 * 1000;
 const DEAL_TYPES = ["ai-ai", "ai-human", "human-human"];
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 chars, no 0/O/1/I
-const OPEN_STATES = new Set(["open", "joined", "awaiting_setup", "funding", "funded", "delivered", "disputed"]);
+// payout_pending: a crypto deal the buyer released (or that was refunded) while the owner sends the coins.
+const OPEN_STATES = new Set(["open", "joined", "awaiting_setup", "funding", "funded", "delivered", "disputed", "payout_pending"]);
 const SNAPSHOT_SCHEMA = 2;
 const TICKET_CATEGORIES = ["deal", "account", "payments", "bug", "other"];
 const MAX_TICKETS = 20000;
@@ -100,6 +102,8 @@ function createStore({ now = () => Date.now() } = {}) {
   const byKeyHash = new Map(); // sha256(apiKey) -> account (AI agents)
   const byUsername = new Map(); // lowercase username -> account (people)
   const byHandle = new Map(); // public handle -> account (AI agents)
+  const payLinks = new Map(); // sha256(token) -> { dealId, accountId, createdAt, expiresAt, usedAt }
+  const unmatched = []; // crypto payments to the owner's wallet that matched no deposit invoice
 
   function newHandle() {
     let h;
@@ -171,6 +175,47 @@ function createStore({ now = () => Date.now() } = {}) {
     return p;
   }
 
+  function cryptoOf(deal) {
+    if (!deal.crypto) deal.crypto = { invoices: [], sellerAddress: null, refundAddress: null, deposit: null, payout: null };
+    return deal.crypto;
+  }
+  function publicInvoice(deal, inv) {
+    const c = deal.crypto;
+    return {
+      id: inv.id, asset: inv.asset, network: inv.network, address: inv.address, qrPayload: inv.address, preview: false,
+      status: c && c.deposit ? "deposit_seen" : "awaiting_deposit",
+      total: coinAmount(inv.total, inv.asset),
+      fees: {
+        principal: coinAmount(inv.principal, inv.asset),
+        platform: coinAmount(inv.fee, inv.asset),
+        swap: "0",
+        // The small matching amount that makes this deposit unique rides along with the payout fee reserve.
+        payoutReserve: coinAmount((BigInt(inv.reserve) + BigInt(inv.tag)).toString(), inv.asset),
+      },
+      rate: inv.rate, fiat: inv.fiat, fiatAmount: inv.fiatAmount,
+      createdAt: new Date(inv.createdAt).toISOString(), expiresAt: new Date(inv.expiresAt).toISOString(),
+    };
+  }
+  function cryptoView(deal, viewerId) {
+    if (deal.rail !== "crypto") return null;
+    const c = deal.crypto || {};
+    const isBuyer = deal.buyerId === viewerId, isSeller = deal.sellerId === viewerId;
+    const inv = (c.invoices || [])[(c.invoices || []).length - 1];
+    const d = c.deposit, po = c.payout;
+    return {
+      sellerAddressSet: Boolean(c.sellerAddress),
+      sellerAddress: isSeller ? c.sellerAddress || null : null,
+      refundAddress: isBuyer ? c.refundAddress || null : null,
+      invoice: isBuyer && inv && !d && inv.expiresAt > now() ? publicInvoice(deal, inv) : null,
+      deposit: d ? { txid: d.txid, amount: coinAmount(d.amount, deal.cryptoAsset), confirmations: d.confirmations, required: d.required || null, confirmed: d.confirmed } : null,
+      payout: po ? {
+        kind: po.kind, amount: coinAmount(po.amount, deal.cryptoAsset), txid: po.txid || null,
+        to: (po.kind === "release" && isSeller) || (po.kind === "refund" && isBuyer) ? po.to : null,
+        requestedAt: new Date(po.requestedAt).toISOString(), sentAt: po.sentAt ? new Date(po.sentAt).toISOString() : null,
+      } : null,
+    };
+  }
+
   function view(deal, viewerId) {
     const role = deal.buyerId === viewerId ? "buyer" : deal.sellerId === viewerId ? "seller" : null;
     const out = {
@@ -187,6 +232,7 @@ function createStore({ now = () => Date.now() } = {}) {
       cryptoNetwork: deal.cryptoNetwork || null,
       quote: deal.rail === "crypto" ? null : money.quoteRange(deal.amount, { code: deal.currency || money.DEFAULT_CURRENCY }),
       payment: paymentView(deal),
+      crypto: cryptoView(deal, viewerId),
       // Both sides see that a deal is frozen and why. Staff notes are not part of this.
       dispute: deal.dispute
         ? {
@@ -223,6 +269,13 @@ function createStore({ now = () => Date.now() } = {}) {
   function paymentView(deal) {
     const p = deal.payment;
     if (!p) return null;
+    if (p.provider === "crypto") {
+      return {
+        status: p.status, provider: "crypto", asset: p.asset, network: p.network, txid: p.txid,
+        amount: coinAmount(p.amountAtomic, p.asset), principal: coinAmount(p.principal, p.asset), platformFee: coinAmount(p.fee, p.asset),
+        authorizedAt: p.authorizedAt ? new Date(p.authorizedAt).toISOString() : null,
+      };
+    }
     return {
       status: p.status,
       provider: p.provider,
@@ -872,6 +925,7 @@ function createStore({ now = () => Date.now() } = {}) {
       deal.deadlineAt = Math.min(wanted, money.holdExpiry(p.authorizedAt));
       setState(deal, "funded", deal.buyerId);
       logEvent(deal.buyerId, deal.id, "funds_held", { amount: p.amount, currency: p.currency, ref: p.intentId, direction: "in" });
+      for (const link of payLinks.values()) if (link.dealId === deal.id && !link.usedAt) link.usedAt = now(); // one-time: done
       return deal;
     },
 
@@ -976,12 +1030,312 @@ function createStore({ now = () => Date.now() } = {}) {
 
     cancelDeal(account, dealId) {
       const deal = mustGetDeal(account, dealId);
-      if (deal.state !== "open" && deal.state !== "joined") {
+      const unpaidCrypto = deal.rail === "crypto" && (deal.state === "funding" || deal.state === "awaiting_setup") && !(deal.crypto && deal.crypto.deposit);
+      if (deal.state !== "open" && deal.state !== "joined" && !unpaidCrypto) {
         throw new ApiError(409, "bad_state", `Deal is ${deal.state}; only unfunded deals can be cancelled`);
       }
       dealsByInvite.delete(deal.inviteCode);
       setState(deal, "cancelled", account.id);
       return view(deal, account.id);
+    },
+
+
+    // ---- one-time pay links ----
+    //
+    // A buyer (typically an AI agent) can hand a link to someone else -- its owner -- who pays the
+    // deal by card without signing in. The link can only fund that one deal. It stops working once
+    // the deal is funded, after it expires, or when a newer link is made for the same deal.
+
+    createPayLink(account, dealId, { ttlMs = 24 * HOUR_MS } = {}) {
+      const deal = mustGetDeal(account, dealId);
+      requireCardDeal(deal);
+      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can make a pay link for this deal");
+      if (!["joined", "awaiting_setup", "funding"].includes(deal.state)) {
+        throw new ApiError(409, "bad_state", deal.state === "open"
+          ? "Nobody has joined this deal yet, so there's nothing to pay"
+          : `Deal is ${deal.state}; a pay link is only for a deal waiting to be paid`);
+      }
+      const t = now();
+      for (const [h, l] of payLinks) if (l.dealId === deal.id || l.expiresAt <= t) payLinks.delete(h); // one live link per deal
+      const token = "vpl_" + crypto.randomBytes(24).toString("hex");
+      const link = { dealId: deal.id, accountId: account.id, createdAt: t, expiresAt: t + ttlMs, usedAt: null };
+      payLinks.set(sha256(token), link);
+      logEvent(account.id, deal.id, "pay_link_created", {});
+      return { token, expiresAt: new Date(link.expiresAt).toISOString() };
+    },
+
+    // Resolves a pay link to the deal and the buyer it pays for. Same error for every failure.
+    usePayLink(token) {
+      const gone = () => new ApiError(404, "pay_link_invalid", "This pay link has expired or been replaced. Ask for a new one.");
+      const link = typeof token === "string" && /^vpl_[0-9a-f]{48}$/.test(token) ? payLinks.get(sha256(token)) : null;
+      if (!link || link.expiresAt <= now()) throw gone();
+      const deal = deals.get(link.dealId);
+      const buyer = accounts.get(link.accountId);
+      if (!deal || !buyer || deal.buyerId !== buyer.id) throw gone();
+      return { link, deal, buyer };
+    },
+
+    // What the person holding the link sees. No IDs, no history: just enough to know what they pay for.
+    payLinkView(token) {
+      const { link, deal, buyer } = this.usePayLink(token);
+      const seller = accounts.get(deal.sellerId);
+      const who = (a) => (a ? { name: a.name, kind: a.kind, handle: a.handle || null } : null);
+      const paid = ["funded", "delivered", "released", "payout_pending"].includes(deal.state) || Boolean(link.usedAt);
+      return {
+        deal: {
+          title: deal.title, description: deal.description, amount: deal.amount,
+          currency: deal.currency || money.DEFAULT_CURRENCY, state: deal.state,
+          quote: money.quoteRange(deal.amount, { code: deal.currency || money.DEFAULT_CURRENCY }),
+        },
+        payingFor: who(buyer),
+        seller: who(seller),
+        sellerReady: seller ? payoutsView(seller).ready : false,
+        paid,
+        payable: !paid && ["joined", "awaiting_setup", "funding"].includes(deal.state),
+        expiresAt: new Date(link.expiresAt).toISOString(),
+      };
+    },
+
+    // ---- crypto deals ----
+    //
+    // Deposits go to the owner's own wallet and the server never holds a key, so it can't send
+    // anything. These methods record what the blockchain shows and what the owner sent.
+    // crypto-escrow.js is the part that reads the chains.
+
+    setCryptoPayoutAddress(account, dealId, rawAddress) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.rail !== "crypto") throw new ApiError(409, "payment_type_mismatch", "This is a card deal; Stripe pays the seller");
+      if (deal.sellerId !== account.id) throw new ApiError(403, "not_seller", "Only the seller sets where the payout goes");
+      if (!["joined", "awaiting_setup", "funding", "funded", "delivered"].includes(deal.state)) {
+        throw new ApiError(409, "bad_state", `Deal is ${deal.state}; the payout address can't change now`);
+      }
+      const address = checkAddress(deal.cryptoAsset, rawAddress, { ApiError });
+      cryptoOf(deal).sellerAddress = address;
+      if (deal.state === "awaiting_setup") setState(deal, "joined", account.id);
+      logEvent(account.id, deal.id, "payout_address_set", { currency: deal.cryptoAsset });
+      return view(deal, account.id);
+    },
+
+    // Everything that must be true before a buyer gets a deposit address.
+    beginCryptoFunding(account, dealId, asset, rawRefundAddress) {
+      const deal = mustGetDeal(account, dealId);
+      requireCryptoDeal(deal, asset);
+      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can request a deposit invoice");
+      if (deal.state === "funded" || deal.state === "delivered") throw new ApiError(409, "already_funded", "This deal is already funded");
+      if (!["joined", "awaiting_setup", "funding"].includes(deal.state)) throw new ApiError(409, "wrong_state", "This deal cannot accept a new deposit");
+      const c = cryptoOf(deal);
+      if (c.deposit) throw new ApiError(409, "deposit_seen", "A deposit for this deal has already arrived. It's waiting for blockchain confirmations.");
+      const seller = accounts.get(deal.sellerId);
+      if (!seller) throw new ApiError(409, "no_seller", "Nobody has joined this deal yet");
+      if (!c.sellerAddress) {
+        setState(deal, "awaiting_setup", account.id);
+        throw new ApiError(409, "seller_not_ready", `${seller.name} hasn't added their ${asset} payout address yet, so there's nowhere to send the money on release. They've been asked to.`);
+      }
+      c.refundAddress = checkAddress(asset, rawRefundAddress, { ApiError });
+      return deal;
+    },
+
+    // The newest invoice that can still be paid, so asking twice doesn't mint a new amount.
+    currentCryptoInvoice(deal) {
+      const inv = deal.crypto && deal.crypto.invoices[deal.crypto.invoices.length - 1];
+      return inv && inv.expiresAt > now() ? publicInvoice(deal, inv) : null;
+    },
+
+    addCryptoInvoice(deal, invoice) {
+      const c = cryptoOf(deal);
+      c.invoices.push(invoice);
+      if (c.invoices.length > 20) c.invoices.splice(0, c.invoices.length - 20);
+      if (deal.state !== "funding") setState(deal, "funding", deal.buyerId);
+      logEvent(deal.buyerId, deal.id, "deposit_invoice", { currency: invoice.asset, detail: `${coinAmount(invoice.total, invoice.asset)} ${invoice.asset}` });
+      return publicInvoice(deal, invoice);
+    },
+
+    // Invoices a payment could still be matched against, for one coin.
+    openCryptoInvoices(asset) {
+      const t = now(), out = [];
+      for (const d of deals.values()) {
+        if (d.rail !== "crypto" || d.cryptoAsset !== asset || d.state !== "funding" || !d.crypto || d.crypto.deposit) continue;
+        for (const inv of d.crypto.invoices) if (inv.matchUntil > t) out.push({ deal: d, invoice: inv });
+      }
+      return out;
+    },
+
+    cryptoDealsConfirming(asset) {
+      return [...deals.values()].filter((d) => d.rail === "crypto" && d.cryptoAsset === asset && d.crypto && d.crypto.deposit && !d.crypto.deposit.confirmed);
+    },
+
+    cryptoDealsToWatch() {
+      const assets = new Set();
+      for (const d of deals.values()) {
+        if (d.rail !== "crypto" || !d.crypto) continue;
+        if ((d.state === "funding" && !d.crypto.deposit) || (d.crypto.deposit && !d.crypto.deposit.confirmed)) assets.add(d.cryptoAsset);
+      }
+      return [...assets];
+    },
+
+    // Has this transaction already been counted anywhere? A payment can only ever fund one deal.
+    cryptoTxKnown(txid) {
+      for (const d of deals.values()) {
+        const c = d.crypto;
+        if (c && ((c.deposit && c.deposit.txid === txid) || (c.payout && c.payout.txid === txid))) return true;
+      }
+      return unmatched.some((u) => u.txid === txid);
+    },
+
+    recordCryptoDeposit(deal, { txid, amount, confirmations, invoiceId, required }) {
+      const c = cryptoOf(deal);
+      if (c.deposit) return deal;
+      c.deposit = { txid, amount: String(amount), confirmations, required, invoiceId, seenAt: now(), confirmed: false, confirmedAt: null };
+      logEvent(deal.buyerId, deal.id, "deposit_seen", { currency: deal.cryptoAsset, ref: txid, detail: `${coinAmount(String(amount), deal.cryptoAsset)} ${deal.cryptoAsset}` });
+      return deal;
+    },
+
+    // Once the deposit is deep enough in the chain, the deal is funded and the seller can start.
+    updateCryptoConfirmations(deal, confirmations) {
+      const c = cryptoOf(deal), d = c.deposit;
+      if (!d || d.confirmed) return deal;
+      d.confirmations = Math.max(d.confirmations || 0, confirmations || 0);
+      if (d.confirmations < d.required) return deal;
+      d.confirmed = true;
+      d.confirmedAt = now();
+      const inv = c.invoices.find((i) => i.id === d.invoiceId);
+      deal.payment = {
+        id: randomId("pay"), provider: "crypto", status: "held", asset: deal.cryptoAsset, network: deal.cryptoNetwork,
+        txid: d.txid, amountAtomic: d.amount, principal: inv.principal, fee: inv.fee,
+        createdAt: d.seenAt, authorizedAt: now(),
+      };
+      deal.fundedAt = now();
+      deal.deadlineAt = now() + deal.deadlineHours * HOUR_MS; // no card hold to outlive here
+      setState(deal, "funded", deal.buyerId);
+      logEvent(deal.buyerId, deal.id, "funds_held", { currency: deal.cryptoAsset, ref: d.txid, direction: "in", detail: `${coinAmount(d.amount, deal.cryptoAsset)} ${deal.cryptoAsset}` });
+      return deal;
+    },
+
+    recordUnmatchedDeposit({ asset, txid, amount }) {
+      if (unmatched.some((u) => u.txid === txid)) return null;
+      const row = { id: randomId("dep"), asset, txid, amount: String(amount), seenAt: now(), resolved: null };
+      unmatched.push(row);
+      if (unmatched.length > 500) unmatched.splice(0, unmatched.length - 500);
+      return row;
+    },
+
+    // Release or refund: work out exactly what to send and where, and queue it for the owner.
+    startCryptoPayout(deal, kind, byId) {
+      const c = cryptoOf(deal), p = deal.payment;
+      if (!p || p.provider !== "crypto" || p.status !== "held") throw new ApiError(409, "no_hold", "There is no confirmed deposit on this deal");
+      const to = kind === "release" ? c.sellerAddress : c.refundAddress;
+      if (!to) throw new ApiError(409, "no_address", kind === "release" ? "The seller hasn't set a payout address" : "The buyer hasn't set a refund address");
+      // The seller gets the deal amount; a refund returns the deal amount and Valence's fee.
+      const amount = kind === "release" ? p.principal : (BigInt(p.principal) + BigInt(p.fee)).toString();
+      c.payout = { kind, to, amount, requestedAt: now(), requestedBy: byId || null, txid: null, sentAt: null };
+      setState(deal, "payout_pending", byId || null);
+      logEvent(kind === "release" ? deal.sellerId : deal.buyerId, deal.id, kind === "release" ? "payout_requested" : "refund_requested",
+        { currency: deal.cryptoAsset, detail: `${coinAmount(amount, deal.cryptoAsset)} ${deal.cryptoAsset}` });
+      return deal;
+    },
+
+    requestCryptoRelease(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.buyerId !== account.id) throw new ApiError(403, "not_buyer", "Only the buyer can release the funds");
+      if (deal.state !== "funded" && deal.state !== "delivered") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded to release`);
+      this.startCryptoPayout(deal, "release", account.id);
+      return view(deal, account.id);
+    },
+
+    requestCryptoRefund(account, dealId) {
+      const deal = mustGetDeal(account, dealId);
+      if (deal.state !== "funded" && deal.state !== "delivered") throw new ApiError(409, "bad_state", `Deal is ${deal.state}; it must be funded to refund`);
+      if (deal.sellerId !== account.id && now() < deal.deadlineAt) {
+        throw new ApiError(403, "deadline_not_reached", "The buyer can only claim a refund after the deadline; the seller can refund any time");
+      }
+      this.startCryptoPayout(deal, "refund", account.id);
+      return view(deal, account.id);
+    },
+
+    cryptoDealsDueForAutoRelease(windowMs) {
+      const t = now();
+      return [...deals.values()].filter((d) => d.rail === "crypto" && d.state === "delivered" && d.deliveredAt && t - d.deliveredAt >= windowMs);
+    },
+
+    // The owner sent the coins and the chain confirms it.
+    completeCryptoPayout(deal, { txid, ownerId }) {
+      const c = cryptoOf(deal), po = c.payout;
+      if (deal.state !== "payout_pending" || !po) throw new ApiError(409, "bad_state", "This deal isn't waiting for a payout");
+      po.txid = txid;
+      po.sentAt = now();
+      deal.payment.status = po.kind === "release" ? "released" : "refunded";
+      setState(deal, po.kind === "release" ? "released" : "refunded", ownerId);
+      const detail = `${coinAmount(po.amount, deal.cryptoAsset)} ${deal.cryptoAsset}`;
+      if (po.kind === "release") {
+        logEvent(deal.sellerId, deal.id, "paid_out", { currency: deal.cryptoAsset, ref: txid, direction: "in", detail });
+        logEvent(deal.buyerId, deal.id, "released", { currency: deal.cryptoAsset, ref: txid, direction: "out", detail });
+      } else {
+        logEvent(deal.buyerId, deal.id, "refunded", { currency: deal.cryptoAsset, ref: txid, direction: "in", detail });
+      }
+      return deal;
+    },
+
+    // ---- owner (staff) access to crypto deals ----
+    ownerDeal(dealId) {
+      const deal = deals.get(dealId);
+      if (!deal || deal.rail !== "crypto") throw new ApiError(404, "deal_not_found", "Crypto deal not found");
+      return deal;
+    },
+
+    ownerResolveCryptoDispute(dealId, outcome, ownerId) {
+      const deal = this.ownerDeal(dealId);
+      if (!["funded", "delivered", "disputed"].includes(deal.state)) throw new ApiError(409, "bad_state", `Deal is ${deal.state}; nothing to resolve`);
+      if (outcome !== "release" && outcome !== "refund") throw new ApiError(400, "invalid_outcome", 'outcome must be "release" or "refund"');
+      if (deal.dispute) { deal.dispute.state = "closed"; deal.dispute.outcome = outcome; }
+      return this.startCryptoPayout(deal, outcome, ownerId);
+    },
+
+    ownerAssignDeposit(depositId, dealId, required) {
+      const row = unmatched.find((u) => u.id === depositId && !u.resolved);
+      if (!row) throw new ApiError(404, "not_found", "That payment isn't waiting to be matched");
+      const deal = this.ownerDeal(dealId);
+      if (deal.cryptoAsset !== row.asset) throw new ApiError(409, "payment_type_mismatch", `That payment is ${row.asset}; the deal is ${deal.cryptoAsset}`);
+      if (deal.state !== "funding" || (deal.crypto && deal.crypto.deposit)) throw new ApiError(409, "bad_state", "That deal isn't waiting for a deposit");
+      const inv = deal.crypto.invoices[deal.crypto.invoices.length - 1];
+      if (!inv) throw new ApiError(409, "no_invoice", "That deal has no deposit invoice");
+      if (BigInt(row.amount) < BigInt(inv.principal) + BigInt(inv.fee)) {
+        throw new ApiError(409, "underpaid", `That payment is less than the deal amount plus the fee (${coinAmount((BigInt(inv.principal) + BigInt(inv.fee)).toString(), row.asset)} ${row.asset}). Refund it instead.`);
+      }
+      row.resolved = { kind: "assigned", dealId, at: now() };
+      this.recordCryptoDeposit(deal, { txid: row.txid, amount: row.amount, confirmations: 0, invoiceId: inv.id, required });
+      return deal;
+    },
+
+    ownerDismissDeposit(depositId, note) {
+      const row = unmatched.find((u) => u.id === depositId && !u.resolved);
+      if (!row) throw new ApiError(404, "not_found", "That payment isn't waiting to be matched");
+      row.resolved = { kind: "dismissed", note: note ? cleanText(note, "note", { min: 0, max: 300 }) : null, at: now() };
+      return row;
+    },
+
+    ownerCryptoQueue() {
+      const name = (id) => { const a = accounts.get(id); return a ? { name: a.name, kind: a.kind, handle: a.handle || null } : null; };
+      const summary = (d) => ({
+        id: d.id, title: d.title, state: d.state, asset: d.cryptoAsset, network: d.cryptoNetwork,
+        amount: d.amount, currency: d.currency, buyer: name(d.buyerId), seller: name(d.sellerId),
+        dispute: d.dispute ? { reason: d.dispute.reason || null, openedAt: new Date(d.dispute.openedAt).toISOString() } : null,
+      });
+      const payouts = [], confirming = [], disputed = [];
+      for (const d of deals.values()) {
+        if (d.rail !== "crypto") continue;
+        const c = d.crypto || {};
+        if (d.state === "payout_pending" && c.payout) {
+          payouts.push({ ...summary(d), payout: { kind: c.payout.kind, to: c.payout.to, amount: coinAmount(c.payout.amount, d.cryptoAsset), requestedAt: new Date(c.payout.requestedAt).toISOString() } });
+        } else if (c.deposit && !c.deposit.confirmed) {
+          confirming.push({ ...summary(d), deposit: { txid: c.deposit.txid, amount: coinAmount(c.deposit.amount, d.cryptoAsset), confirmations: c.deposit.confirmations, required: c.deposit.required } });
+        } else if (d.state === "disputed") {
+          disputed.push(summary(d));
+        }
+      }
+      return {
+        payouts, confirming, disputed,
+        unmatched: unmatched.filter((u) => !u.resolved).map((u) => ({ id: u.id, asset: u.asset, txid: u.txid, amount: coinAmount(u.amount, u.asset), seenAt: new Date(u.seenAt).toISOString() })),
+      };
     },
 
     // ---- people: change password ----
@@ -1308,6 +1662,8 @@ function createStore({ now = () => Date.now() } = {}) {
         events,
         tickets: [...tickets.values()],
         ticketSeq,
+        payLinks: [...payLinks.entries()],
+        unmatchedDeposits: unmatched,
       };
     },
 
@@ -1344,6 +1700,8 @@ function createStore({ now = () => Date.now() } = {}) {
       events.push(...(state.events || []));
       for (const t of state.tickets || []) tickets.set(t.id, t); // older snapshots have no tickets
       ticketSeq = state.ticketSeq || 0;
+      for (const [h, l] of state.payLinks || []) if (l.expiresAt > t) payLinks.set(h, l);
+      unmatched.push(...(state.unmatchedDeposits || []));
       return { changed };
     },
 
@@ -1355,8 +1713,13 @@ function createStore({ now = () => Date.now() } = {}) {
       let onHold = 0, holdsAtRisk = 0;
       for (const d of deals.values()) {
         const p = d.payment;
-        if (["funded", "delivered", "disputed"].includes(d.state) && (!p || p.status !== "held")) {
+        if (["funded", "delivered", "disputed", "payout_pending"].includes(d.state) && (!p || p.status !== "held")) {
           problems.push(`${d.id} is ${d.state} with no held payment`);
+        }
+        if (p && p.provider === "crypto") {
+          if (refs.has(p.txid)) problems.push(`${p.txid} funds both ${refs.get(p.txid)} and ${d.id}`);
+          refs.set(p.txid, d.id);
+          continue;
         }
         if (!p || !p.intentId) continue;
         if (refs.has(p.intentId)) problems.push(`${p.intentId} is attached to ${refs.get(p.intentId)} and ${d.id}`);

@@ -3,7 +3,7 @@ const { clientIp, ipKey, bearer, sendJson, readJson, readRaw, limiter, quota } =
 const { createPow } = require("./pow");
 const { createSupport } = require("./support");
 const money = require("./money");
-const { cryptoMethods, refuseUnconfiguredInvoice, requireCryptoDeal } = require("./crypto-checkout");
+const { cryptoMethods } = require("./crypto-checkout");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
 const { installBiolink } = require('./biolink');
 
@@ -146,7 +146,7 @@ function createApi(store, opts = {}) {
     store.logout(token);
     return { body: { ok: true } };
   });
-  add("GET", "/me", { auth: true }, ({ account }) => ({ body: store.me(account) }));
+  add("GET", "/me", { auth: true }, ({ account }) => ({ body: { ...store.me(account), isOwner: Boolean(escrow && escrow.isOwner(account)) } }));
 
   // ---- deals ----
   add("GET", "/deals", { auth: true }, ({ account }) => ({ body: { deals: store.listDeals(account) } }));
@@ -163,18 +163,39 @@ function createApi(store, opts = {}) {
   }));
 
   // ---- money ----
-  add("GET", "/crypto/methods", {}, () => ({ body: cryptoMethods() }));
-  add("POST", "/deals/:id/crypto/invoice", { auth: true, limit: payLimit }, ({ account, params, body }) => {
-    const deal = store.getDeal(account, params.id);
-    if (deal.yourRole !== "buyer") throw new ApiError(403, "not_buyer", "Only the buyer can request a deposit invoice");
-    requireCryptoDeal(deal, body.asset);
-    if (!["joined", "awaiting_setup", "funding"].includes(deal.state)) {
-      throw new ApiError(409, "wrong_state", "This deal cannot accept a new deposit");
-    }
-    // Never return the owner's fee wallet as a deposit address. An address alone
-    // cannot identify a deal, detect confirmations, hold funds, or execute payouts.
-    refuseUnconfiguredInvoice(body.asset);
-  });
+  // Crypto: deposits to the owner's wallets, watched on chain; payouts sent by the owner and
+  // checked on chain. See crypto-escrow.js.
+  const escrow = opts.escrow || null;
+  const needEscrow = () => {
+    if (!escrow || !escrow.ready) throw new ApiError(503, "crypto_not_ready", cryptoMethods().reason);
+    return escrow;
+  };
+  add("GET", "/crypto/methods", {}, () => ({ body: escrow ? escrow.methods() : cryptoMethods() }));
+  // issueInvoice checks who's asking before whether crypto is switched on, so an outsider learns nothing.
+  add("POST", "/deals/:id/crypto/invoice", { auth: true, limit: payLimit }, async ({ account, params, body }) => ({
+    body: await (escrow || needEscrow()).issueInvoice(account, params.id, { asset: body.asset, refundAddress: body.refundAddress }),
+  }));
+  add("POST", "/deals/:id/crypto/payout-address", { auth: true, mutate: true }, ({ account, params, body }) => ({
+    body: store.setCryptoPayoutAddress(account, params.id, body.address),
+  }));
+  add("POST", "/deals/:id/crypto/check", { auth: true, limit: payLimit }, async ({ account, params }) => ({
+    body: await needEscrow().checkNow(account, params.id),
+  }));
+
+  // The owner's crypto payout queue. Only accounts named in OWNER_USERNAMES get past these.
+  add("GET", "/owner/crypto", { auth: true }, ({ account }) => ({ body: needEscrow().queue(account) }));
+  add("POST", "/owner/crypto/deals/:id/payout", { auth: true, limit: payLimit }, async ({ account, params, body }) => ({
+    body: await needEscrow().confirmPayout(account, params.id, body.txid),
+  }));
+  add("POST", "/owner/crypto/deals/:id/resolve", { auth: true }, async ({ account, params, body }) => ({
+    body: await needEscrow().resolve(account, params.id, body.outcome),
+  }));
+  add("POST", "/owner/crypto/deposits/:id/assign", { auth: true }, async ({ account, params, body }) => ({
+    body: await needEscrow().assignDeposit(account, params.id, body.dealId),
+  }));
+  add("POST", "/owner/crypto/deposits/:id/dismiss", { auth: true }, async ({ account, params, body }) => ({
+    body: await needEscrow().dismissDeposit(account, params.id, body.note),
+  }));
   //
   // None of these routes move money themselves. They ask Stripe to, and record what it did.
   const payments = opts.payments;
@@ -199,13 +220,39 @@ function createApi(store, opts = {}) {
     body: store.markDelivered(account, params.id, body.note),
   }));
 
+  // Card deals release through Stripe; crypto deals go to the owner's payout queue.
+  const isCrypto = (account, id) => store.getDeal(account, id).rail === "crypto";
   add("POST", "/deals/:id/release", { auth: true, mutate: true }, async ({ account, params }) => ({
-    body: await needPayments().release(account, params.id),
+    body: isCrypto(account, params.id) ? await needEscrow().release(account, params.id) : await needPayments().release(account, params.id),
   }));
 
   add("POST", "/deals/:id/refund", { auth: true, mutate: true }, async ({ account, params, body }) => ({
-    body: await needPayments().refund(account, params.id, { reason: body.reason || null }),
+    body: isCrypto(account, params.id) ? await needEscrow().refund(account, params.id) : await needPayments().refund(account, params.id, { reason: body.reason || null }),
   }));
+
+  // ---- one-time pay links ----
+  // The buyer (usually an AI agent) asks for a link and gives it to whoever will pay by card.
+  // The link can only fund this one deal: no sign-in, no other access, dead once paid.
+  const payLinkLimit = limiter({ windowMs: 10 * 60 * 1000, max: opts.payLinkLimit || 60, code: "pay_link_rate_limited" });
+  add("POST", "/deals/:id/pay-link", { auth: true, mutate: true, limit: payLimit }, ({ account, params }) => {
+    const { token, expiresAt } = store.createPayLink(account, params.id);
+    return { status: 201, body: { url: `${opts.siteUrl || "https://valencemm.com"}/pay/${token}`, expiresAt,
+      note: "Anyone with this link can pay this deal by card. It works once, for this deal only, and expires in 24 hours." } };
+  });
+  add("GET", "/pay-links/:token", { limit: payLinkLimit }, ({ params }) => ({
+    body: { ...store.payLinkView(params.token), publishableKey: payments ? payments.publishableKey : null },
+  }));
+  add("POST", "/pay-links/:token/fund", { mutate: true, limit: payLimit }, async ({ params }) => {
+    const { deal, buyer } = store.usePayLink(params.token);
+    const started = await needPayments().startFunding(buyer, deal.id);
+    // Only what Stripe's card form needs. Nothing about the buyer's account leaves this route.
+    return { body: { clientSecret: started.clientSecret, stripeAccount: started.stripeAccount, quote: started.quote, alreadyFunded: Boolean(started.alreadyFunded) } };
+  });
+  add("POST", "/pay-links/:token/funded", { mutate: true, limit: payLimit }, async ({ params }) => {
+    const { deal, buyer } = store.usePayLink(params.token);
+    const after = await needPayments().confirmFunding(buyer, deal.id);
+    return { body: { paid: ["funded", "delivered", "released"].includes(after.state) } };
+  });
 
   add("POST", "/deals/:id/dispute", { auth: true, mutate: true }, ({ account, params, body }) => ({
     body: store.openDispute(account, params.id, body.reason),
@@ -526,7 +573,7 @@ function createApi(store, opts = {}) {
       if (typeof key !== "string" || key.length === 0 || key.length > 64) {
         throw new ApiError(400, "invalid_idempotency_key", "Idempotency-Key must be 1-64 characters");
       }
-      cacheKey = `${account.id}|${req.method} ${apiPath}|${key}`;
+      cacheKey = `${account ? account.id : "anon:" + ip}|${req.method} ${apiPath}|${key}`;
       const hit = idempotencyCache.get(cacheKey);
       if (hit) return sendJson(res, hit.status, hit.body, { "Idempotent-Replay": "true" });
     }

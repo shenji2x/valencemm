@@ -4,6 +4,21 @@ const path = require("path");
 const { createStore } = require("./store");
 const { createApi } = require("./api");
 const { sendJson, limiter, clientIp, ipKey } = require("./http");
+const { createCryptoEscrow } = require("./crypto-escrow");
+const { walletsFromEnv } = require("./wallets");
+const { createPrices } = require("./prices");
+const { createChains } = require("./chains");
+
+// "Payout to send" alerts for the owner: a Discord webhook (OWNER_ALERT_WEBHOOK_URL, or the
+// support webhook if that's all there is). Without one, the owner queue in the dashboard is the only place.
+function ownerAlertFromEnv(env = process.env) {
+  const url = env.OWNER_ALERT_WEBHOOK_URL || env.DISCORD_WEBHOOK_URL;
+  if (!url) return null;
+  return async (text) => {
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: text, allowed_mentions: { parse: [] } }) });
+    if (!r.ok) throw new Error(`owner alert webhook answered ${r.status}`);
+  };
+}
 const { createPersistence, backendFromEnv } = require("./persist");
 const { discordFromEnv } = require("./discord");
 const { blobsFromEnv } = require("./files");
@@ -96,9 +111,17 @@ function createApp(opts = {}) {
   const blobs = opts.blobs || blobsFromEnv();
   const stripe = opts.stripe || stripeFromEnv();
   const payments = opts.payments || createPayments({ store, stripe, persistence, siteUrl: opts.siteUrl || `https://${CANONICAL_HOST}` });
+  const escrow = opts.escrow || createCryptoEscrow({
+    store, persistence,
+    wallets: opts.wallets || walletsFromEnv(),
+    prices: opts.prices || createPrices(),
+    chains: opts.chains || createChains(),
+    owners: opts.owners || String(process.env.OWNER_USERNAMES || "").split(","),
+    notify: opts.notify === undefined ? ownerAlertFromEnv() : opts.notify,
+  });
   const apiParts = {};
   const profileMedia = opts.profileMedia || r2FromEnv();
-  const handleApi = createApi(store, { ...opts, persistence, discord, mailer, blobs, stripe, payments, profileMedia, mediaVerifier: opts.mediaVerifier || verifyMedia, exports: apiParts });
+  const handleApi = createApi(store, { siteUrl: `https://${CANONICAL_HOST}`, ...opts, persistence, discord, mailer, blobs, stripe, payments, escrow, profileMedia, mediaVerifier: opts.mediaVerifier || verifyMedia, exports: apiParts });
   const statics = loadStatic();
   // Every request counts, pages and files included, not just the API. A normal visit is a few dozen
   // requests; this only stops one address hammering the server.
@@ -174,6 +197,7 @@ function createApp(opts = {}) {
         service: "Valence",
         status: "online",
         payments: stripe.configured ? "stripe (cards, funds held at the provider)" : "off",
+        crypto: escrow.ready ? `on (${Object.keys(escrow.wallets).join(", ")}; payouts sent by the owner)` : "off",
         webhooks: stripe.acceptsWebhooks ? "on" : "off",
         storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
         email: mailer.enabled ? "on" : "off",
@@ -189,7 +213,9 @@ function createApp(opts = {}) {
     }
     const isProfile = /^\/u\/[a-zA-Z0-9_-]{1,40}$/.test(pathname);
     if (isProfile && !store.profileOwner(pathname.slice(3))?.profile?.published) return sendError(res, { status: 404, code: 'not_found', message: 'This profile is not published' }, false);
-    const file = statics.get(isProfile ? '/profile' : pathname);
+    // A one-time pay link. The page itself is static; the token is checked by the API.
+    const isPayLink = /^\/pay\/vpl_[0-9a-f]{48}$/.test(pathname);
+    const file = statics.get(isProfile ? '/profile' : isPayLink ? '/pay' : pathname);
     if (!file) return sendError(res, { status: 404, code: "not_found", message: "Not found" }, false);
     res.writeHead(200, { "Content-Type": file.type, "Content-Length": file.body.length, "Cache-Control": file.cache });
     res.end(req.method === "HEAD" ? undefined : file.body);
@@ -211,6 +237,7 @@ function createApp(opts = {}) {
   server.blobs = blobs;
   server.stripe = stripe;
   server.payments = payments;
+  server.escrow = escrow;
   server.support = apiParts.support;
   // Tell Discord which slash commands exist. Never blocks startup.
   server.commandsRegistered = discord.mode === "bot" && !opts.skipCommandRegistration
@@ -219,12 +246,16 @@ function createApp(opts = {}) {
   // Load the saved snapshot before taking traffic. server.js waits for this.
   // Load the snapshot, then start the auto-release and hold-expiry sweeps.
   server.ready = persistence.load().then((r) => {
-    if (!opts.skipTimers) payments.startTimers();
+    if (!opts.skipTimers) {
+      payments.startTimers();
+      escrow.startTimers();
+    }
     return r;
   });
   const close = server.close.bind(server);
   server.close = (cb) => {
     payments.stopTimers();
+    escrow.stopTimers();
     return close(cb);
   };
   return server;

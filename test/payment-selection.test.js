@@ -74,13 +74,18 @@ test("invoice API binds buyer, deal, coin and rail and never trusts browser fund
   for (const [cryptoAsset, network] of [["BTC", "Bitcoin"], ["ETH", "Ethereum"], ["LTC", "Litecoin"], ["SOL", "Solana"]]) {
     const d = store.createDeal(buyer, { title: "Bound invoice", amount: 50000, paymentType: "crypto", cryptoAsset });
     store.joinDeal(seller, d.inviteCode);
-    assert.equal((await invoice(d.id, cryptoAsset)).status, 503);
+    // Crypto is on, but the seller hasn't said where the payout goes, so no deposit address is issued
+    // and nothing the browser sent (an address, a status, a total) is taken from the request.
+    const first = await invoice(d.id, cryptoAsset);
+    assert.equal(first.status, 409); assert.equal(first.body.error.code, "seller_not_ready");
+    assert.equal(JSON.stringify(first.body).includes("attacker"), false);
     assert.equal((await invoice(d.id, cryptoAsset === "BTC" ? "ETH" : "BTC")).body.error.code, "payment_type_mismatch");
     assert.equal((await invoice(d.id, "USDT")).body.error.code, "usdt_disabled");
     assert.equal((await invoice(d.id, cryptoAsset, b.apiKey)).status, 403);
     assert.equal((await invoice(d.id, cryptoAsset, c.apiKey)).status, 404);
     const after = store.getDeal(buyer, d.id);
-    assert.equal(after.state, "joined"); assert.equal(after.payment, null); assert.equal(after.cryptoNetwork, network);
+    assert.equal(after.state, "awaiting_setup"); assert.equal(after.payment, null); assert.equal(after.cryptoNetwork, network);
+    assert.equal(after.crypto.invoice, null); assert.equal(after.crypto.deposit, null);
   }
   const card = store.createDeal(buyer, { title: "Card only", amount: 50000 }); store.joinDeal(seller, card.inviteCode);
   assert.equal((await invoice(card.id, "BTC")).body.error.code, "payment_type_mismatch");

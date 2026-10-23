@@ -917,6 +917,7 @@
     ticket: { title: "Support ticket", icon: "support", nav: "support", render: viewTicket, slim: true },
     faq: { title: "FAQ", icon: "faq", render: viewFaq, slim: true },
     settings: { title: "Settings", icon: "settings", render: viewSettings, slim: true },
+    owner: { title: "Crypto payouts", icon: "shield", render: viewOwner },
   };
 
   // Repeats fn while this view is open and the tab is visible. Cleared on navigation.
@@ -1034,6 +1035,11 @@
     const me = app.me;
     $("#me-name").textContent = me.name;
     $("#me-kind").textContent = me.kind === "agent" ? "AI agent" : "Person";
+    // Only accounts listed in OWNER_USERNAMES on the server see the payout queue.
+    if (me.isOwner && !document.querySelector('.side nav a[data-view="owner"]')) {
+      put(document.querySelector(".side nav"), el("div", { class: "side-group" }, "Owner"),
+        el("a", { href: "#owner", "data-view": "owner" }, icon("shield"), "Crypto payouts"));
+    }
     const av = $("#me-avatar");
     av.textContent = me.name.slice(0, 1);
     if (me.kind === "agent") av.classList.add("agent");
@@ -1105,7 +1111,9 @@
   }
 
   // Builds Stripe's card form for a deal and resolves once the hold is on the card.
-  async function cardForm(dealId, { onFunded }) {
+  // `source` lets a page other than the deal fund it (the one-time pay link). By default it's the
+  // signed-in buyer's own deal.
+  async function cardForm(dealId, { onFunded, source = null }) {
     const wrap = el("div", { class: "pay" });
     const slot = el("div", { class: "pay-slot" });
     const msg = el("p", { class: "flash error", hidden: true, role: "alert" });
@@ -1115,18 +1123,20 @@
       el("p", { class: "dim" }, "Card details go straight to Stripe. Valence never sees them."));
 
     try {
-      const [payouts, started] = await Promise.all([
-        api("GET", "/payouts"),
-        api("POST", `/deals/${encodeURIComponent(dealId)}/fund`, undefined, { headers: { "Idempotency-Key": newKey() } }),
-      ]);
+      const src = source || {
+        key: async () => (await api("GET", "/payouts")).publishableKey,
+        start: () => api("POST", `/deals/${encodeURIComponent(dealId)}/fund`, undefined, { headers: { "Idempotency-Key": newKey() } }),
+        confirm: () => api("POST", `/deals/${encodeURIComponent(dealId)}/funded`, {}, { headers: { "Idempotency-Key": newKey() } }),
+      };
+      const [publishableKey, started] = await Promise.all([src.key(), src.start()]);
       if (started.alreadyFunded) {
         await onFunded();
         return wrap;
       }
-      if (!payouts.publishableKey) throw new Error("Card payments aren't finished being set up on this server.");
+      if (!publishableKey) throw new Error("Card payments aren't finished being set up on this server.");
       const Stripe = await loadStripeJs();
       // A direct charge lives on the seller's own Stripe account, so Stripe.js must be told whose.
-      const stripe = Stripe(payouts.publishableKey, { stripeAccount: started.stripeAccount });
+      const stripe = Stripe(publishableKey, { stripeAccount: started.stripeAccount });
       const elements = stripe.elements({ clientSecret: started.clientSecret, appearance: stripeAppearance() });
       const element = elements.create("payment", { layout: "tabs" });
       const label = `Pay ${fmt(started.quote.buyerTotal, started.quote.currency)}`;
@@ -1148,7 +1158,7 @@
         }
         button.textContent = "Confirming\u2026";
         try {
-          await api("POST", `/deals/${encodeURIComponent(dealId)}/funded`, {}, { headers: { "Idempotency-Key": newKey() } });
+          await src.confirm();
         } catch (err) {
           show(err.message);
         }
@@ -1161,6 +1171,110 @@
       button.parentNode.remove();
       show(err.message);
     }
+    return wrap;
+  }
+
+  // ---------- one-time pay link (/pay/vpl_...) ----------
+  // Someone was handed this link, typically by an AI agent they run. No sign-in: the link itself
+  // is the permission, and it can only fund this one deal.
+  async function publicApi(method, path, body) {
+    let res;
+    try {
+      res = await fetch("/v1" + path, { method, headers: body !== undefined ? { "Content-Type": "application/json" } : {}, body: body !== undefined ? JSON.stringify(body) : undefined });
+    } catch {
+      throw new Error("Can't reach the server. Check your connection and try again.");
+    }
+    let data = {};
+    try { data = await res.json(); } catch { /* empty */ }
+    if (!res.ok) {
+      const err = new Error((data.error && data.error.message) || "Something went wrong");
+      err.code = data.error && data.error.code;
+      throw err;
+    }
+    return data;
+  }
+
+  async function payPage() {
+    const box = $("#paylink");
+    const token = location.pathname.split("/").pop();
+    const who = (p) => p ? `${p.name} (${p.kind === "agent" ? "AI agent" : "person"}${p.handle ? `, ${p.handle}` : ""})` : "someone";
+    let info;
+    try {
+      info = await publicApi("GET", `/pay-links/${encodeURIComponent(token)}`);
+    } catch (err) {
+      box.textContent = "";
+      put(box, el("h1", {}, "This pay link doesn't work"),
+        el("p", { class: "sub" }, err.message),
+        el("p", { class: "muted" }, "Pay links work once and expire after 24 hours. Ask whoever sent it for a new one."));
+      return;
+    }
+    const q = info.deal.quote;
+    function done(text) {
+      box.textContent = "";
+      put(box, el("h1", {}, "Payment held"),
+        el("p", { class: "flash ok" }, text),
+        el("p", { class: "muted" }, `Your card is authorised for ${fmt(q.buyerTotal, q.currency)}, not charged. It's charged only when ${info.payingFor.name} releases the deal after the work is delivered. If the deal is cancelled, the hold disappears.`),
+        el("p", { class: "dim" }, "You can close this page."));
+    }
+    box.textContent = "";
+    put(box,
+      el("h1", {}, "Pay for a deal"),
+      el("p", { class: "sub" }, `${who(info.payingFor)} asked you to pay for this deal on Valence MM.`),
+      el("dl", { class: "review" },
+        el("dt", {}, "Deal"), el("dd", {}, info.deal.title),
+        info.deal.description ? el("dt", {}, "Details") : null, info.deal.description ? el("dd", {}, info.deal.description) : null,
+        el("dt", {}, "Seller"), el("dd", {}, who(info.seller)),
+        el("dt", {}, "Deal amount"), el("dd", {}, fmt(q.amount, q.currency)),
+        el("dt", {}, "Valence fee (1%)"), el("dd", {}, fmt(q.platformFee, q.currency)),
+        el("dt", {}, "You pay"), el("dd", {}, fmt(q.buyerTotal, q.currency))),
+      el("p", { class: "muted" }, `Your card is held, not charged. ${info.payingFor.name} releases it to the seller once the work is done, or it's cancelled and the hold disappears.`));
+    if (info.paid) return done("This deal is already paid. There's nothing more to do.");
+    if (!info.payable) {
+      put(box, el("p", { class: "flash warn" }, "This deal can't be paid any more. It may have been cancelled."));
+      return;
+    }
+    if (!info.sellerReady) {
+      put(box, el("p", { class: "flash warn" }, "The seller hasn't finished setting up payouts yet, so this deal can't be paid. Try this link again later."));
+      return;
+    }
+    const slot = el("div", { class: "pay-wrap" });
+    const start = el("button", { type: "button", class: "btn block" }, `Pay ${fmt(q.buyerTotal, q.currency)}`);
+    put(box, slot, start, el("p", { class: "dim" }, `This link works once and expires ${when(info.expiresAt)}.`));
+    start.addEventListener("click", async () => {
+      start.remove();
+      put(slot, el("p", { class: "muted" }, "Opening the secure card form\u2026"));
+      const form = await cardForm(null, {
+        source: {
+          key: async () => info.publishableKey,
+          start: () => publicApi("POST", `/pay-links/${encodeURIComponent(token)}/fund`),
+          confirm: () => publicApi("POST", `/pay-links/${encodeURIComponent(token)}/funded`),
+        },
+        onFunded: async () => done(`Thanks. ${fmt(q.buyerTotal, q.currency)} is now held for "${info.deal.title}".`),
+      });
+      if (!box.contains(slot)) return; // already showing the done state
+      slot.textContent = "";
+      put(slot, form);
+    });
+  }
+
+  // A buyer can hand the card payment to someone else (an agent's owner, a company card holder).
+  function payLinkButton(id) {
+    const wrap = el("div", { class: "paylink-box" });
+    const b = el("button", { type: "button", class: "btn secondary" }, "Get a pay link");
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        const r = await api("POST", `/deals/${encodeURIComponent(id)}/pay-link`, {}, { headers: { "Idempotency-Key": newKey() } });
+        wrap.textContent = "";
+        put(wrap,
+          el("p", {}, "Send this to whoever is paying. It opens this deal's card payment without signing in, works once, and expires ", when(r.expiresAt), "."),
+          el("div", { class: "row" }, el("code", { class: "paylink-url" }, r.url), copyButton(r.url, "Copy link")));
+      } catch (err) {
+        b.disabled = false;
+        flash(err.message);
+      }
+    });
+    put(wrap, b);
     return wrap;
   }
 
@@ -1443,7 +1557,7 @@
         const crypto = draft.paymentType === "crypto";
         const paymentChoices = el("div", { class: "choices", role: "group", "aria-label": "Payment type" },
           choice(!crypto, "Stripe · Card", "Card authorization until release. Buyer pays the quoted Valence fee; Stripe processing fees reduce the seller's payout. Seller needs Stripe payout setup.", () => { draft.amount = amount.value; draft.paymentType = "stripe"; draw(); }),
-          choice(crypto, "Crypto · BTC, ETH, LTC, SOL", "Choose a coin and its native network. Buyer covers 1% plus network fees. Crypto funding is not open yet; you can save the deal, but cannot deposit.", () => { draft.amount = amount.value; draft.paymentType = "crypto"; draw(); }));
+          choice(crypto, "Crypto · BTC, ETH, LTC, SOL", "BTC, ETH, LTC or SOL on its own network. Held in Valence's wallet until release, then Valence sends the payout. Buyer pays 1% plus the network fee.", () => { draft.amount = amount.value; draft.paymentType = "crypto"; draw(); }));
         const coinSelect = el("select", { id: "deal-crypto", name: "cryptoAsset" },
           ...[["BTC", "Bitcoin"], ["ETH", "Ethereum"], ["LTC", "Litecoin"], ["SOL", "Solana"]].map(([symbol, network]) =>
             el("option", { value: symbol, selected: symbol === draft.cryptoAsset || undefined }, `${symbol} on ${network}`)),
@@ -1454,7 +1568,7 @@
           const cents = parseMoney(amount.value);
           if (cents === null) { note.textContent = `Between ${fmt(MIN_AMOUNT, code)} and ${fmt(MAX_AMOUNT, code)}.`; return; }
           const q = quoteFor(cents, code);
-          if (crypto) { note.textContent = `Agreed value: ${fmt(cents, code)}. The future invoice will quote the exact ${draft.cryptoAsset} amount, 1% Valence fee and outgoing network fee reserve. Sending wallet fees are separate. No swap is included; deposit and payout use the same coin and network.`; return; }
+          if (crypto) { note.textContent = `Agreed value: ${fmt(cents, code)}. The deposit invoice quotes the exact ${draft.cryptoAsset} amount at that day's price, 1% Valence fee and outgoing network fee reserve. Sending wallet fees are separate. No swap is included; deposit and payout use the same coin and network.`; return; }
           note.textContent = `The buyer pays ${fmt(q.buyerTotal, code)}, including our ${fmt(q.platformFee, code)} fee (1%, minimum ${fmt(50, code)} for card deals). The seller is quoted ${fmt(cents, code)} and receives about ${fmt(q.sellerNet, code)} after Stripe's card fee.`;
         };
         currSel.addEventListener("change", () => {
@@ -1471,7 +1585,7 @@
           el("p", { class: "q spaced" }, "Payment type"), paymentChoices,
           crypto ? el("label", { for: "deal-crypto" }, "Cryptocurrency and network") : null,
           crypto ? coinSelect : null,
-          crypto ? el("p", { class: "hint" }, "USDT is disabled on all networks because outgoing transfers need a funded gas wallet. Crypto transfers are generally irreversible. Both sides will see the chosen coin before joining. The payout network fee must be acknowledged before release or refund.") : null,
+          crypto ? el("p", { class: "hint" }, "USDT isn't available yet. Crypto transfers can't be reversed, so before any deposit the seller adds a payout address and the buyer a refund address, and both are checked.") : null,
           el("label", { for: "deal-currency" }, "Currency"),
           currSel,
           el("label", { for: "deal-amount" }, "Amount"),
@@ -1511,7 +1625,7 @@
             el("dt", {}, draft.role === "seller" ? "You receive, about" : "The seller receives, about"), el("dd", {}, crypto ? "Same coin and network, shown in the payout quote" : fmt(q.sellerNet, draft.currency)),
             el("dt", {}, "Refund deadline"), el("dd", {}, `${DEADLINES.find(([h]) => h === draft.deadlineHours)[1]} after the buyer pays`)),
           el("p", { class: "hint" }, "Next you'll get a one-time invite code to send to the other side. Nobody pays anything until they've joined."),
-          crypto ? el("p", { class: "flash warn" }, "Crypto deposits are not open yet. This creates an unfunded deal only. A deposit address will appear only after secure deposit tracking and automatic payouts are connected.") : null,
+          crypto ? el("p", { class: "flash info" }, "Crypto deals are held in Valence's own wallet, not by Stripe. When the deal is released, Valence sends the payout, and both sides can see every transfer on the blockchain.") : null,
           nav("Create deal"));
         form.onsubmit = async (e) => {
           e.preventDefault();
@@ -1572,7 +1686,7 @@
           el("dt", {}, "Receiver gets, about"), el("dd", {}, p.paymentType === "crypto" ? "Same coin and network; payout quote required" : fmt(quoteFor(p.amount, p.currency).sellerNet, p.currency)),
           el("dt", {}, "Refund deadline"), el("dd", {}, `${p.deadlineHours} hours after funding`)),
         p.canJoin ? null : el("p", { class: "flash error" }, p.reason),
-        p.paymentType === "crypto" ? el("p", { class: "flash warn" }, "Crypto funding is not open yet. Buyer pays 1% plus network fees. No swap is included. This deal will remain unfunded until secure deposits and automatic payouts are connected.") : null,
+        p.paymentType === "crypto" ? el("p", { class: "flash info" }, "A crypto deal: the deposit is held in Valence's wallet until release, then Valence sends it to the seller. If you're the seller, you'll add your payout address after joining.") : null,
         el("div", { class: "wiz-nav" },
           el("button", { type: "button", class: "btn ghost", onclick: () => askCode(p.inviteCode) }, "Back"),
           p.canJoin ? el("button", {
@@ -1695,6 +1809,178 @@
       draw();
     }
 
+    // ---- crypto deals: deposit to Valence's wallet, payout sent by Valence ----
+    // Forms live across redraws so the live poll doesn't wipe what someone is typing or reset the
+    // invoice countdown.
+    const cryptoUi = {};
+    const EXPLORE = { BTC: "https://mempool.space/tx/", LTC: "https://litecoinspace.org/tx/", ETH: "https://etherscan.io/tx/", SOL: "https://solscan.io/tx/" };
+    const txLink = (txid) => el("a", { href: EXPLORE[deal.cryptoAsset] + encodeURIComponent(txid), target: "_blank", rel: "noopener" }, "View the transaction");
+
+    function payoutAddressForm() {
+      if (!cryptoUi.payout) {
+        const input = el("input", { id: "payout-address", name: "address", autocomplete: "off", spellcheck: "false", class: "code", placeholder: `Your ${deal.cryptoAsset} address` });
+        const form = el("form", { class: "addr-form" },
+          el("label", { for: "payout-address" }, `Where should your ${deal.cryptoAsset} be sent?`), input,
+          el("p", { class: "hint" }, `A ${deal.cryptoAsset} address on ${deal.cryptoNetwork} that you control. It's checked before it's saved, and you can change it until the payout is sent.`),
+          el("button", { type: "submit", class: "btn" }, "Save payout address"));
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          busy = true;
+          flash("");
+          try {
+            deal = await api("POST", `/deals/${encodeURIComponent(id)}/crypto/payout-address`, { address: input.value }, { headers: { "Idempotency-Key": newKey() } });
+            cryptoUi.editPayout = false;
+            toast("Payout address saved.");
+          } catch (err) {
+            flash(err.message);
+          } finally {
+            busy = false;
+          }
+          draw();
+        });
+        cryptoUi.payout = { form, input };
+      }
+      return cryptoUi.payout.form;
+    }
+
+    function buyerCheckout() {
+      if (!cryptoUi.checkout) {
+        const input = el("input", { id: "refund-address", name: "refund", autocomplete: "off", spellcheck: "false", class: "code", placeholder: `Your ${deal.cryptoAsset} address` });
+        if (deal.crypto && deal.crypto.refundAddress) input.value = deal.crypto.refundAddress;
+        const host = el("div", { class: "crypto" });
+        const go = el("button", { type: "button", class: "btn" }, "Get deposit address");
+        const sent = el("button", { type: "button", class: "btn secondary" }, "I've sent it");
+        let mounted = null;
+        go.addEventListener("click", () => { if (mounted) mounted.reload(); });
+        sent.addEventListener("click", async () => {
+          sent.disabled = true;
+          flash("");
+          try {
+            deal = await api("POST", `/deals/${encodeURIComponent(id)}/crypto/check`, {});
+            toast(deal.crypto && deal.crypto.deposit ? "Payment found. Waiting for confirmations." : "Not on the blockchain yet. It's checked every minute anyway.");
+            draw();
+          } catch (err) {
+            flash(err.message);
+          } finally {
+            setTimeout(() => { sent.disabled = false; }, 10000);
+          }
+        });
+        cryptoUi.checkout = el("div", { class: "crypto-pay" },
+          el("label", { for: "refund-address" }, `Your ${deal.cryptoAsset} refund address`), input,
+          el("p", { class: "hint" }, `If the deal is refunded, Valence sends the money back here. Use an address you control on ${deal.cryptoNetwork}.`),
+          el("div", { class: "actions" }, go), host, el("div", { class: "actions" }, sent));
+        if (window.ValenceCryptoCheckout) {
+          mounted = window.ValenceCryptoCheckout.mount(host, { request: api, dealId: id, asset: deal.cryptoAsset, refundAddress: () => input.value });
+        } else {
+          put(host, el("p", { class: "flash error" }, "Crypto checkout could not load. Reload the page before continuing."));
+        }
+      }
+      return cryptoUi.checkout;
+    }
+
+    function cryptoNext(p, buyer, disputeButton, supportLink) {
+      const c = deal.crypto || {};
+      const coin = deal.cryptoAsset;
+      const pay = deal.payment;
+      const them = other() ? other().name : buyer ? "the seller" : "the buyer";
+      const cancel = (label = "Cancel deal") => confirmButton(label, "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"));
+      const held = () => el("p", { class: "held" }, `${pay.amount} ${coin} held in Valence's wallet. `, txLink(pay.txid));
+      switch (deal.state) {
+        case "joined":
+        case "awaiting_setup":
+        case "funding": {
+          const dep = c.deposit;
+          if (dep) {
+            put(p, el("h3", {}, "Deposit received. Waiting for the blockchain."),
+              el("p", {}, `${dep.amount} ${coin} arrived. The deal starts once it has ${dep.required} confirmation${dep.required === 1 ? "" : "s"} (it has ${dep.confirmations}).${buyer ? "" : " Don't start work until then."}`),
+              el("p", {}, txLink(dep.txid)), el("span", { class: "live" }, "Checked every minute"));
+            break;
+          }
+          if (!buyer) {
+            if (!c.sellerAddress || cryptoUi.editPayout) {
+              put(p, el("h3", {}, c.sellerAddress ? "Change your payout address" : `Add your ${coin} payout address`),
+                el("p", {}, `${them} can't pay until you do, so the money has somewhere to go when it's released.`),
+                payoutAddressForm(), el("div", { class: "actions" }, cancel("Leave and cancel deal")));
+            } else {
+              put(p, el("h3", {}, "You're in. Waiting for the buyer's deposit."),
+                el("p", {}, "Don't start work until the deposit is confirmed. This page updates by itself."),
+                el("p", { class: "dim" }, "Payout address: ", el("code", {}, c.sellerAddress), " ",
+                  el("button", { type: "button", class: "btn ghost small", onclick: () => { cryptoUi.editPayout = true; payoutAddressForm(); cryptoUi.payout.input.value = c.sellerAddress; draw(); } }, "Change")),
+                el("span", { class: "live" }, "Waiting for the deposit"),
+                el("div", { class: "actions" }, cancel("Leave and cancel deal")));
+            }
+            break;
+          }
+          if (!c.sellerAddressSet) {
+            put(p, el("h3", {}, "Waiting on the seller"),
+              el("p", {}, `${them} hasn't added their ${coin} payout address yet. Don't send anything until a deposit address appears here.`),
+              el("span", { class: "live" }, "Waiting for their address"), el("div", { class: "actions" }, cancel()));
+            break;
+          }
+          put(p, el("h3", {}, `Pay with ${coin}`),
+            el("p", {}, `Send the exact amount shown to Valence's ${coin} wallet. It's held there until you release it to ${them}, or refunded to you.`),
+            buyerCheckout(), el("div", { class: "actions" }, cancel()));
+          break;
+        }
+        case "funded":
+        case "delivered": {
+          const passed = Date.now() >= Date.parse(deal.deadlineAt);
+          if (buyer) {
+            put(p, el("h3", {}, deal.state === "delivered" ? `${them} says it's done` : "Your deposit is held"), held(),
+              deal.state === "delivered"
+                ? el("p", {}, "Check the work, then release. If you do nothing, it releases automatically 72 hours after delivery.")
+                : el("p", {}, `Release it once you're happy with what ${them} delivered. Valence then sends ${pay.principal} ${coin} to them.`),
+              deal.deliveryNote ? el("blockquote", { class: "note" }, deal.deliveryNote) : null,
+              el("div", { class: "actions" },
+                confirmButton("Release the payment", "", "Click again to pay the seller. This can't be undone", () => act("release", "Released. Valence is sending the payout.")),
+                passed ? confirmButton("Get a refund", "secondary", "Click again to ask for the refund", () => act("refund", "Refund requested. Valence is sending it back.")) : null,
+                disputeButton()),
+              el("p", { class: "hint" }, passed
+                ? "The deadline has passed, so you can ask for a refund of the deal amount and fee."
+                : `If the deal isn't done by ${when(deal.deadlineAt)} you can ask for a refund.`),
+              supportLink);
+          } else {
+            put(p, el("h3", {}, deal.state === "delivered" ? "Delivered. Waiting for the buyer to release." : "The deposit is confirmed. Time to do the work."), held(),
+              el("p", {}, `When ${them} releases it, Valence sends ${pay.principal} ${coin} to your payout address.`),
+              c.sellerAddress ? el("p", { class: "dim" }, "Payout address: ", el("code", {}, c.sellerAddress)) : null,
+              deal.state === "delivered" ? el("span", { class: "live" }, "Releases automatically 72 hours after delivery") : null,
+              el("div", { class: "actions" },
+                deal.state === "funded" ? el("button", { type: "button", class: "btn", onclick: () => ask("deliver", "Anything to tell the buyer about what you delivered? (optional)", "Marked as delivered.") }, "Mark as delivered") : null,
+                confirmButton("Refund the buyer", "secondary", "Click again to refund", () => act("refund", "Refund requested. Valence is sending it back.")),
+                disputeButton()),
+              supportLink);
+          }
+          break;
+        }
+        case "payout_pending": {
+          const po = c.payout || {};
+          const toSeller = po.kind === "release";
+          const recipient = toSeller ? (buyer ? them : "you") : buyer ? "you" : them;
+          put(p, el("h3", {}, toSeller ? "Released. The payout is on its way." : "Refund on its way"),
+            el("p", {}, `Valence is sending ${po.amount} ${coin} to ${recipient}. It's usually sent within 24 hours, and the transaction appears here once it is.`),
+            po.to ? el("p", { class: "dim" }, "Going to: ", el("code", {}, po.to)) : null,
+            el("span", { class: "live" }, "Waiting for the transfer"), supportLink);
+          break;
+        }
+        case "released":
+        case "refunded": {
+          const po = c.payout || {};
+          put(p, el("h3", {}, deal.state === "released" ? "Done. The seller has been paid." : "Refunded"),
+            el("p", {}, `${po.amount} ${coin} was sent ${deal.state === "released" ? "to the seller" : "back to the buyer"}.`),
+            po.txid ? el("p", {}, txLink(po.txid)) : null);
+          break;
+        }
+        case "disputed":
+          put(p, el("h3", {}, "This deal is in dispute"),
+            el("p", {}, "The deposit stays in Valence's wallet while we look at it. Add anything useful in a support ticket and we'll come back to you."),
+            deal.dispute && deal.dispute.reason ? el("blockquote", { class: "note" }, deal.dispute.reason) : null,
+            el("div", { class: "actions" }, btnLink("#support", "Open a support ticket", "secondary")));
+          break;
+        default:
+          put(p, el("h3", {}, "Cancelled"), el("p", {}, "This deal was cancelled before anyone paid anything."));
+      }
+    }
+
     function nextPanel() {
       const buyer = deal.yourRole === "buyer";
       const q = deal.quote;
@@ -1717,11 +2003,8 @@
         draw();
       } }, "Open a dispute");
 
-      if (payMethod === "crypto" && ["joined", "funding", "awaiting_setup"].includes(deal.state)) {
-        put(p, el("h3", {}, buyer ? `Pay with ${deal.cryptoAsset}` : "Waiting for a confirmed crypto deposit"),
-          el("p", {}, `This deal uses ${deal.cryptoAsset} on ${deal.cryptoNetwork}. Crypto funding is not open yet. Do not send funds to a personal wallet or start work before a deposit is confirmed.`),
-          buyer ? cryptoPanel(deal) : null,
-          el("div", { class: "actions" }, confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+      if (payMethod === "crypto" && !["open", "cancelled"].includes(deal.state)) {
+        cryptoNext(p, buyer, disputeButton, supportLink);
         return p;
       }
 
@@ -1760,6 +2043,8 @@
             put(p, el("div", { class: "actions" },
               el("button", { type: "button", class: "btn", onclick: () => { paying = true; draw(); } }, `Pay ${fmt(q.buyerTotal, q.currency)}`),
               confirmButton("Cancel deal", "ghost", "Click again to cancel", () => act("cancel", "Deal cancelled"))));
+            if (!app.payLinkBox || app.payLinkBox.dealId !== id) app.payLinkBox = { dealId: id, el: payLinkButton(id) };
+            put(p, el("p", { class: "hint" }, "Someone else paying, like the owner of this AI agent? Give them a one-time pay link."), app.payLinkBox.el);
           } else {
             const slot = el("div", { class: "pay-wrap" }, el("p", { class: "muted" }, "Opening the secure card form\u2026"));
             put(p, slot);
@@ -1870,7 +2155,7 @@
 
     function progress() {
       const labels = ["Created", "Other side joined", "Payment held", "Paid out"];
-      const reached = { open: 0, joined: 1, awaiting_setup: 1, funding: 1, funded: 2, delivered: 2, disputed: 2, released: 3 };
+      const reached = { open: 0, joined: 1, awaiting_setup: 1, funding: 1, funded: 2, delivered: 2, disputed: 2, payout_pending: 2, released: 3 };
       const idx = reached[deal.state] === undefined ? -1 : reached[deal.state];
       const ended = deal.state === "refunded" || deal.state === "cancelled";
       return el("ol", { class: "progress" }, labels.map((l, i) => {
@@ -1917,7 +2202,7 @@
           el("details", { class: "more" }, el("summary", {}, "History"),
             el("ul", { class: "timeline" }, deal.history.map((h) => el("li", {}, `${when(h.at)}: ${STATE_LABELS[h.state] || h.state} (by ${nameOf(h.by)})`))))),
         cryptoQuoteMode
-          ? el("p", { class: "dim" }, "Crypto deposits are not open yet. Never send funds without a current deposit invoice for this deal.")
+          ? el("p", { class: "dim" }, "Only ever send the exact amount from this deal's current deposit invoice.")
           : el("p", { class: "dim" }, "The money is held by Stripe, never by Valence. ", el("a", { href: "#faq" }, "How this works"), "."));
     }
     draw();
@@ -1970,6 +2255,90 @@
     payouts_started: "Payout setup started",
     payouts_ready: "Payouts ready",
   };
+  // ---------- owner: the crypto payout queue ----------
+  // The server can see crypto arrive but holds no keys, so it can't send any. Everything that needs
+  // sending is listed here with the exact amount and address; paste the transaction ID once sent and
+  // the server checks it on the blockchain before closing the deal.
+  async function viewOwner(view, _arg, gen) {
+    if (!app.me.isOwner) {
+      put(view, el("p", { class: "muted" }, "This page is for the site owner."));
+      return;
+    }
+    const EXPLORE = { BTC: "https://mempool.space/tx/", LTC: "https://litecoinspace.org/tx/", ETH: "https://etherscan.io/tx/", SOL: "https://solscan.io/tx/" };
+    const tx = (asset, txid) => el("a", { href: EXPLORE[asset] + encodeURIComponent(txid), target: "_blank", rel: "noopener" }, "view transaction");
+    const box = el("div", { class: "owner" });
+    put(view, el("p", { id: "msg", class: "flash", role: "status", hidden: true }), box);
+    const section = (title, hint, items) => el("section", { class: "card owner-sec" }, el("h2", {}, title), hint ? el("p", { class: "muted" }, hint) : null, ...items);
+    const nothing = (text) => [el("p", { class: "dim" }, text)];
+    const post = async (btn, path, body, ok) => {
+      btn.disabled = true;
+      flash("");
+      try {
+        await api("POST", path, body);
+        toast(ok);
+        await load();
+      } catch (err) {
+        flash(err.message);
+        btn.disabled = false;
+      }
+    };
+
+    async function load() {
+      let q;
+      try {
+        q = await api("GET", "/owner/crypto");
+      } catch (err) {
+        flash(err.message);
+        return;
+      }
+      if (!alive(gen)) return;
+      box.textContent = "";
+      const payouts = q.payouts.map((d) => {
+        const input = el("input", { class: "code", placeholder: "Paste the transaction ID once sent", autocomplete: "off", spellcheck: "false", "aria-label": "Transaction ID" });
+        const btn = el("button", { type: "button", class: "btn" }, "Confirm sent");
+        btn.addEventListener("click", () => post(btn, `/owner/crypto/deals/${encodeURIComponent(d.id)}/payout`, { txid: input.value.trim() }, "Checked on the blockchain and recorded."));
+        const who = d.payout.kind === "release" ? d.seller : d.buyer;
+        return el("div", { class: "owner-item" },
+          el("p", {}, el("strong", {}, d.payout.kind === "release" ? "Pay the seller" : "Refund the buyer"), ` for "${d.title}". Send `,
+            el("strong", { class: "num" }, `${d.payout.amount} ${d.asset}`), ` on ${d.network} to ${who ? who.name : "them"}:`),
+          el("div", { class: "row" }, el("code", { class: "addr" }, d.payout.to), copyButton(d.payout.to, "Copy address"), copyButton(d.payout.amount, "Copy amount")),
+          el("p", { class: "dim" }, `Requested ${when(d.payout.requestedAt)}. Send at least this amount, and pay the network fee on top.`),
+          el("div", { class: "row" }, input, btn));
+      });
+      const confirming = q.confirming.map((d) => el("div", { class: "owner-item" },
+        el("p", {}, `"${d.title}": ${d.deposit.amount} ${d.asset}, ${d.deposit.confirmations} of ${d.deposit.required} confirmations. `, tx(d.asset, d.deposit.txid))));
+      const disputed = q.disputed.map((d) => {
+        const rel = el("button", { type: "button", class: "btn secondary small" }, "Release to seller");
+        const ref = el("button", { type: "button", class: "btn secondary small" }, "Refund buyer");
+        rel.addEventListener("click", () => { if (confirm(`Release "${d.title}" to the seller?`)) post(rel, `/owner/crypto/deals/${encodeURIComponent(d.id)}/resolve`, { outcome: "release" }, "Queued the payout to the seller."); });
+        ref.addEventListener("click", () => { if (confirm(`Refund "${d.title}" to the buyer?`)) post(ref, `/owner/crypto/deals/${encodeURIComponent(d.id)}/resolve`, { outcome: "refund" }, "Queued the refund to the buyer."); });
+        return el("div", { class: "owner-item" },
+          el("p", {}, el("strong", {}, d.title), ` (${d.asset}), ${d.buyer ? d.buyer.name : "?"} paying ${d.seller ? d.seller.name : "?"}`),
+          d.dispute && d.dispute.reason ? el("blockquote", { class: "note" }, d.dispute.reason) : null,
+          el("div", { class: "actions" }, rel, ref));
+      });
+      const unmatched = q.unmatched.map((u) => {
+        const dealId = el("input", { class: "code", placeholder: "Deal ID (deal_...)", autocomplete: "off", spellcheck: "false", "aria-label": "Deal ID" });
+        const assign = el("button", { type: "button", class: "btn secondary small" }, "Count it for this deal");
+        const dismiss = el("button", { type: "button", class: "btn ghost small" }, "Dismiss");
+        assign.addEventListener("click", () => post(assign, `/owner/crypto/deposits/${encodeURIComponent(u.id)}/assign`, { dealId: dealId.value.trim() }, "Counted for that deal."));
+        dismiss.addEventListener("click", () => { const note = prompt("Dismiss this payment? Optional note (for example: refunded by hand, or my own transfer):"); if (note !== null) post(dismiss, `/owner/crypto/deposits/${encodeURIComponent(u.id)}/dismiss`, { note }, "Dismissed."); });
+        return el("div", { class: "owner-item" },
+          el("p", {}, el("strong", { class: "num" }, `${u.amount} ${u.asset}`), ` arrived ${when(u.seenAt)} and matched no deal. `, tx(u.asset, u.txid)),
+          el("div", { class: "row" }, dealId, assign, dismiss));
+      });
+      put(box,
+        section("Payouts to send", "Release and refund payouts waiting on you. Send from your wallet, then paste the transaction ID.", payouts.length ? payouts : nothing("Nothing to send.")),
+        section("Deposits confirming", null, confirming.length ? confirming : nothing("No deposits waiting for confirmations.")),
+        section("Disputes", "Crypto deals frozen by a dispute. Decide where the money goes; it then appears under Payouts to send.", disputed.length ? disputed : nothing("No open disputes.")),
+        section("Payments that matched no deal", "Usually someone sent the wrong amount, or an exchange took its fee out of it. Count it for the right deal if it covers the deal and fee, or refund it by hand and dismiss it. Your own transfers to these wallets show up here too.", unmatched.length ? unmatched : nothing("Nothing unmatched.")),
+        section("Deposit wallets", "Where buyers send crypto. Change them with WALLET_BTC, WALLET_LTC, WALLET_ETH and WALLET_SOL on the server.",
+          Object.entries(q.wallets).map(([asset, addr]) => el("div", { class: "row" }, el("strong", {}, asset), el("code", { class: "addr" }, addr), copyButton(addr, "Copy")))));
+    }
+    await load();
+    every(30000, load);
+  }
+
   async function viewPayments(view, _arg, gen) {
     const [history, payouts] = await Promise.all([api("GET", "/payments"), api("GET", "/payouts")]);
     if (!alive(gen)) return;
@@ -1998,16 +2367,6 @@
       el("p", { class: "dim" }, "These are completed movements, past tense. Valence holds no balance for you: every payment belongs to one deal."));
   }
 
-  function cryptoPanel(deal = null) {
-    const panel = el("div", { class: "crypto" });
-    if (!window.ValenceCryptoCheckout) {
-      put(panel, el("p", { class: "flash error" }, "Crypto checkout could not load. Reload the page before continuing."));
-      return panel;
-    }
-    window.ValenceCryptoCheckout.mount(panel, { request: api, dealId: deal && deal.id, asset: deal && deal.cryptoAsset });
-    return panel;
-  }
-
   // Shown on the payments page and in settings.
   function payoutsCard(payouts) {
     if (!payouts.enabled) {
@@ -2030,7 +2389,7 @@
     if (payouts.ready) {
       put(body,
         el("div", { class: "set-row" }, el("span", {}, "Payouts"), el("strong", { class: "ok" }, "Ready")),
-        el("p", { class: "muted" }, "Stripe has verified you and will pay released deals to your bank, usually within two business days. Valence never holds your money and never sees your bank details."),
+        el("p", { class: "muted" }, "Stripe has verified you and will pay released deals to your bank, usually within two business days. Valence never holds card money and never sees your bank details."),
         el("div", { class: "actions" }, payoutButton("Manage at Stripe", "secondary"), refresh));
     } else if (payouts.started) {
       put(body,
@@ -2588,6 +2947,7 @@
     renderNav();
     setupScroll();
     if (page === "home") heroMotion();
+    else if (page === "pay") payPage();
     else if (page === "login") loginPage();
     else if (page === "signup") signupPage();
   }

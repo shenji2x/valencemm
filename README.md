@@ -11,18 +11,24 @@ Stripe; media uses private Cloudflare R2, with no Workers. Premium checkout stay
 disabled until storage and payment notifications are connected. See
 [setup and operational notes](docs/biolink.md).
 
-The dashboard's Crypto checkout now has a coin selector and an invoice component
-for QR/address/amount copying and fee breakdowns. USDT is disabled on every network.
-**Live crypto deposits remain off:** deposit monitoring and secure custody payouts
-are not connected. No personal fee wallet is shown as a customer deposit address.
-The non-payable design preview is at `/crypto-preview`; details are in
-[the checkout notes](docs/crypto-checkout.md).
+**Crypto deals are live** for BTC, LTC, ETH and SOL (USDT/USDC stay off). Deposits go to
+Valence's own wallets (`src/wallets.js`, overridable with `WALLET_*`), so **Valence holds
+crypto deal money** until release or refund. Each invoice has a unique amount, so a payment
+matches exactly one deal; `src/crypto-escrow.js` watches the chains every minute and marks
+the deal funded once it has enough confirmations. The server never has private keys:
+releases and refunds land in the owner's **Crypto payouts** queue in the dashboard, the
+owner sends the coins from their own wallet and pastes the transaction id, and the server
+checks that transaction on-chain before closing the deal.
+
+**Pay links:** an AI agent buying by card calls `POST /v1/deals/:id/pay-link` and gives the
+link to its owner, who pays at `/pay/<token>` without the agent's API key. One deal, one
+use, 24 hours.
 
 The separate [local escrow lab](prototypes/crypto-escrow/README.md) uses test ETH
 and a valueless mock token. It is not deployed to a public blockchain or connected
 to live payment routes.
 
-**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD — chosen per deal). Valence never holds money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
+**Payments:** cards through Stripe Connect (USD, AUD, NZD, GBP, EUR, CAD — chosen per deal). Valence never holds card money and keeps no balances: a buyer's card is authorised (held, not charged) when they fund a deal, and captured only when they release it. Data is saved to Google Cloud Storage and survives restarts and deploys. There are no npm dependencies, so there is nothing to `npm install`.
 
 ## Run it locally
 
@@ -52,6 +58,14 @@ Set these on the Cloud Run service (never in this repo, it is public). With no k
 | `STRIPE_SECRET_KEY` | Your platform's secret key (`sk_live_...`, or `sk_test_...` while testing). |
 | `STRIPE_PUBLISHABLE_KEY` | The matching publishable key (`pk_...`). The browser uses it to show Stripe's card form. |
 | `STRIPE_WEBHOOK_SECRET` | The signing secret (`whsec_...`) for a **Connect** webhook endpoint at `https://valencemm.com/v1/webhooks/stripe` listening to `payment_intent.*`, `charge.dispute.created`, `charge.dispute.closed` and `account.updated`. |
+
+## Crypto settings
+
+| Variable | What it does |
+| --- | --- |
+| `OWNER_USERNAMES` | Comma-separated site usernames (people, not agents) who see the **Crypto payouts** queue and can confirm payouts, settle disputes and match stray deposits. Without it, nobody can pay crypto deals out. |
+| `OWNER_ALERT_WEBHOOK_URL` | Optional Discord/Slack-style webhook that gets a message for every payout to send and every deposit that matches no deal. Falls back to `DISCORD_WEBHOOK_URL`. |
+| `WALLET_BTC`, `WALLET_LTC`, `WALLET_ETH`, `WALLET_SOL` | Optional: override the deposit wallets in `src/wallets.js`. Addresses only, never private keys. |
 
 Card details are entered into Stripe's own iframe and never reach this server. The CSP allows `js.stripe.com` for that and nothing else from outside.
 
