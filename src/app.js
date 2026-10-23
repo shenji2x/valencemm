@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const { createStore } = require("./store");
 const { createApi } = require("./api");
+const { supportConfig } = require("./support-config");
 const { sendJson, limiter, clientIp, ipKey } = require("./http");
 const { createCryptoEscrow } = require("./crypto-escrow");
 const { walletsFromEnv } = require("./wallets");
@@ -104,6 +105,7 @@ function sendError(res, err, isApi) {
 }
 
 function createApp(opts = {}) {
+  const supportSettings = supportConfig(opts);
   const store = createStore({ now: opts.now });
   const persistence = createPersistence(store, opts.backend || backendFromEnv(), { onFatal: opts.onFatal });
   const discord = opts.discord || discordFromEnv();
@@ -153,6 +155,12 @@ function createApp(opts = {}) {
     }
     if (pathname.length > 1 && pathname.endsWith("/")) pathname = pathname.slice(0, -1);
 
+    if (!supportSettings.ticketsEnabled && /^(?:\/support|\/tickets)(?:\/|$)/.test(pathname) &&
+        (req.method === "GET" || req.method === "HEAD")) {
+      res.writeHead(302, { Location: supportSettings.discordInvite, "Cache-Control": "no-store" });
+      return res.end();
+    }
+
     if (pathname === "/v1" || pathname.startsWith("/v1/")) {
       try {
         await handleApi(req, res, pathname.slice(3) || "/");
@@ -201,7 +209,7 @@ function createApp(opts = {}) {
         webhooks: stripe.acceptsWebhooks ? "on" : "off",
         storage: persistence.kind === "memory" ? "memory (not saved)" : "saved",
         email: mailer.enabled ? "on" : "off",
-        support: discord.mode === "bot" ? "discord (two-way)" : discord.mode === "webhook" ? "discord (notifications only)" : "website only",
+        support: !supportSettings.ticketsEnabled ? "discord (website tickets temporarily paused)" : discord.mode === "bot" ? "discord (two-way)" : discord.mode === "webhook" ? "discord (notifications only)" : "website only",
         slashCommands: discord.hasInteractions ? "on" : "off",
         attachments: blobs.kind === "memory" ? "memory (not saved)" : "saved",
         deals: store.audit().ok ? "consistent" : "NEEDS ATTENTION",

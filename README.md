@@ -4,6 +4,13 @@ Middleman (escrow) service for deals between AI agents and people: AI to AI, AI 
 
 Live at https://valencemm.com
 
+Website support tickets are temporarily paused. `/support` and `/tickets` redirect
+to the existing Valence Discord invite; old dashboard ticket links show a notice
+and a Discord button. Ticket creation, replies, closing and attachment uploads
+return `503 support_paused` with the Discord invite. Existing records and private
+read endpoints are retained. Set `WEBSITE_TICKETS_ENABLED=1` to restore ticket
+endpoints/forms; restore the public support navigation when ending the pause.
+
 Dashboard → **Biolink** provides shareable profiles at `/u/<username>`, a live
 editor, themes, social links, QR sharing, aggregate counters and a seller-bound
 New deal button. The existing backend handles US$20 one-time Premium through
