@@ -53,7 +53,7 @@ async function start(opts = {}) {
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch { /* not JSON */ }
-    return { status: res.status, json };
+    return { status: res.status, json, headers: res.headers };
   }
   const close = () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); });
   return { server, call, clock, close };
@@ -126,7 +126,7 @@ test("authenticator app: set up with a code, then sign-in needs a code; recovery
 
 test("email: verify an address with a code, then use email codes to sign in", async () => {
   const m = fakeMailer();
-  await withServer({ mailer: m.mailer }, async (ctx) => {
+  await withServer({ mailer: m.mailer, emailLimit: 1000 }, async (ctx) => {
     const { token } = (await ctx.call("POST", "/v1/humans/signup", { body: { username: "alice", password: "password-123" } })).json;
     const sec0 = (await ctx.call("GET", "/v1/account/security", { key: token })).json;
     assert.equal(sec0.emailAvailable, true);
@@ -187,6 +187,22 @@ test("email: verify an address with a code, then use email codes to sign in", as
   });
 });
 
+test("email sends are limited to five requests per 12 hours per IP", async () => {
+  const m = fakeMailer();
+  await withServer({ mailer: m.mailer }, async (ctx) => {
+    const { token } = (await ctx.call("POST", "/v1/humans/signup", { body: { username: "limitedemail", password: "password-123" } })).json;
+    for (let i = 0; i < 5; i++) {
+      const sent = await ctx.call("POST", "/v1/account/email", { key: token, body: { email: `user${i}@example.com` } });
+      assert.equal(sent.status, 200, `send ${i + 1} should be allowed`);
+    }
+    const blocked = await ctx.call("POST", "/v1/account/email", { key: token, body: { email: "user5@example.com" } });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.json.error.code, "email_rate_limited");
+    const retryAfter = Number(blocked.headers.get("retry-after"));
+    assert.ok(retryAfter >= 43190 && retryAfter <= 43200, `expected a 12-hour retry window, got ${retryAfter}s`);
+  });
+});
+
 test("email features say so clearly when email isn't set up, and agents can't use them", async () => {
   await withServer({}, async (ctx) => {
     const { token } = (await ctx.call("POST", "/v1/humans/signup", { body: { username: "carol", password: "password-123" } })).json;
@@ -216,3 +232,4 @@ test("two-factor settings survive a restart", async () => {
     assert.equal(done.status, 200);
   });
 });
+

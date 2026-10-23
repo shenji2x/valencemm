@@ -332,7 +332,7 @@ function createApi(store, opts = {}) {
 
   // ---- people: two-factor sign-in and security settings ----
   const mailer = opts.mailer || { enabled: false, async send() { throw new Error("off"); } };
-  const emailLimit = limiter({ windowMs: 3600 * 1000, max: opts.emailLimit || 12, code: "email_rate_limited" });
+  const emailLimit = limiter({ windowMs: 12 * 3600 * 1000, max: opts.emailLimit || 5, code: "email_rate_limited" });
   const { codeEmail } = require("./email");
   async function sendCode(purpose, { to, code, username }) {
     if (!mailer.enabled) throw new ApiError(503, "email_unavailable", "Email isn't set up on this server yet");
@@ -610,4 +610,5 @@ function createApi(store, opts = {}) {
 }
 
 module.exports = { createApi };
+
 
