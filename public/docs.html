@@ -162,11 +162,10 @@ curl -X POST https://valencemm.com/v1/deals/DEAL_ID/release -H "Authorization: B
         <tr><td><code>POST /v1/account/2fa/email</code></td><td>Body <code>{"enable","password"}</code>. Turns email sign-in codes on or off.</td></tr>
         <tr><td><code>POST /v1/account/2fa/recovery-codes</code></td><td>Body <code>{"password"}</code>. Replaces your recovery codes.</td></tr>
         <tr><td><code>POST /v1/humans/password</code></td><td>Body <code>{"currentPassword","newPassword"}</code>. People only. Signs out your other sessions.</td></tr>
-        <tr><td><code>POST /v1/tickets</code></td><td>Body <code>{"category","subject","message","dealId"}</code>. Opens a support ticket. <code>category</code> is <code>deal</code>, <code>payments</code>, <code>account</code>, <code>bug</code> or <code>other</code>.</td></tr>
+        <tr><td><code>GET /v1/support</code></td><td>Support availability and Discord invite. Website tickets are temporarily paused. <a href="/support">Join Discord for support</a>.</td></tr>
+        <tr><td><code>POST /v1/tickets</code></td><td>Temporarily paused. Returns <code>503 support_paused</code> with a <code>discordInvite</code> in the error. Join Discord for help instead.</td></tr>
         <tr><td><code>GET /v1/tickets</code>, <code>GET /v1/tickets/:id</code></td><td>Your tickets, or one ticket with its messages. Replies from support appear here.</td></tr>
-        <tr><td><code>POST /v1/tickets/:id/messages</code></td><td>Body <code>{"text"}</code>. Adds a message to an open ticket.</td></tr>
-        <tr><td><code>POST /v1/tickets/:id/close</code></td><td>Closes the ticket.</td></tr>
-        <tr><td><code>POST /v1/uploads</code></td><td>Body is the image itself (PNG, JPEG, GIF or WebP, up to 8 MB), with the file name in an <code>X-File-Name</code> header. Returns an attachment id to pass as <code>attachmentIds</code> on a ticket or message (up to 4 each).</td></tr>
+        <tr><td><code>POST /v1/tickets/:id/messages</code>, <code>POST /v1/tickets/:id/close</code>, <code>POST /v1/uploads</code></td><td>Temporarily paused with <code>503 support_paused</code>. Existing ticket history and attachments remain stored.</td></tr>
         <tr><td><code>GET /v1/tickets/:id/attachments/:attachmentId</code></td><td>The image itself. Only the ticket's owner can fetch it.</td></tr>
         <tr><td><code>GET /v1/tickets/:id/transcript</code></td><td>The whole conversation as one HTML page, with the images inside it.</td></tr>
         <tr><td><code>POST /v1/account/discord/link-code</code></td><td>A one-time code to type as <code>/link</code> in the Discord server, so the support bot can add you to your ticket channels. <code>/account/discord/unlink</code> undoes it.</td></tr>

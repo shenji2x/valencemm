@@ -7,10 +7,11 @@ const { cryptoMethods } = require("./crypto-checkout");
 const { memoryBlobs, MAX_BYTES, MAX_FILES_PER_MESSAGE } = require("./files");
 const { installBiolink } = require('./biolink');
 
-const DEFAULT_INVITE = "https://discord.gg/eVYyxbyy22";
+const { supportConfig, DEFAULT_INVITE } = require("./support-config");
 
 // Builds the /v1 request handler. Routes are plain data: method, path pattern, options, handler.
 function createApi(store, opts = {}) {
+  const supportSettings = supportConfig(opts);
   const handleApiRef = opts.exports || {};
   const routes = [];
   const idempotencyCache = new Map(); // "accountId|METHOD path|key" -> { status, body }
@@ -354,7 +355,7 @@ function createApi(store, opts = {}) {
   }));
 
   add("GET", "/account/security", { auth: true }, ({ account }) => ({
-    body: { ...store.security(account), emailAvailable: Boolean(mailer.enabled), discordLinking: discord.hasInteractions, discordInvite: opts.discordInvite || DEFAULT_INVITE },
+    body: { ...store.security(account), emailAvailable: Boolean(mailer.enabled), discordLinking: supportSettings.ticketsEnabled && discord.hasInteractions, discordInvite: opts.discordInvite || DEFAULT_INVITE },
   }));
   add("POST", "/account/email", { auth: true, limit: emailLimit }, async ({ account, body }) => {
     if (!mailer.enabled) throw new ApiError(503, "email_unavailable", "Email isn't set up on this server yet");
@@ -424,11 +425,13 @@ function createApi(store, opts = {}) {
 
   add("GET", "/support", {}, () => ({
     body: {
-      discordInvite: opts.discordInvite || DEFAULT_INVITE,
-      liveReplies: discord.mode === "bot",
+      discordInvite: supportSettings.discordInvite,
+      ticketsEnabled: supportSettings.ticketsEnabled,
+      message: supportSettings.ticketsEnabled ? null : "Website tickets are temporarily paused. Join our Discord server for support.",
+      liveReplies: supportSettings.ticketsEnabled && discord.mode === "bot",
       relay: discord.mode,
       attachments: { maxFiles: MAX_FILES_PER_MESSAGE, maxBytes: MAX_BYTES, types: ["image/png", "image/jpeg", "image/gif", "image/webp"] },
-      discordLinking: discord.hasInteractions,
+      discordLinking: supportSettings.ticketsEnabled && discord.hasInteractions,
     },
   }));
 
@@ -448,8 +451,8 @@ function createApi(store, opts = {}) {
 
   add("GET", "/tickets", { auth: true }, async ({ account }) => {
     const open = store.listTickets(account).filter((t) => t.status === "open").slice(0, 5);
-    await Promise.all(open.map((v) => support.sync(store.ticketForRelay(v.id))));
-    return { body: { tickets: store.listTickets(account), liveReplies: discord.mode === "bot" } };
+    if (supportSettings.ticketsEnabled) await Promise.all(open.map((v) => support.sync(store.ticketForRelay(v.id))));
+    return { body: { tickets: store.listTickets(account), liveReplies: supportSettings.ticketsEnabled && discord.mode === "bot" } };
   });
   add("POST", "/tickets", { auth: true, limit: ticketLimit }, async ({ account, body }) => {
     const attachments = claimUploads(account, body.attachmentIds);
@@ -459,7 +462,7 @@ function createApi(store, opts = {}) {
   });
   add("GET", "/tickets/:id", { auth: true }, async ({ account, params }) => {
     store.getTicket(account, params.id); // 404 before touching Discord
-    await support.sync(store.ticketForRelay(params.id));
+    if (supportSettings.ticketsEnabled) await support.sync(store.ticketForRelay(params.id));
     return { body: store.getTicket(account, params.id) };
   });
   add("POST", "/tickets/:id/messages", { auth: true, limit: messageLimit }, async ({ account, params, body }) => {
@@ -549,6 +552,14 @@ function createApi(store, opts = {}) {
         throw new ApiError(400, "bad_request", "Malformed URL");
       }
     });
+
+    // Reject paused ticket writes before reading uploads or calling relay code.
+    if (!supportSettings.ticketsEnabled && req.method === "POST" &&
+        (apiPath === "/uploads" || /^\/tickets(?:\/|$)/.test(apiPath))) {
+      const err = new ApiError(503, "support_paused", "Website tickets are temporarily paused. Join our Discord server for support.");
+      err.extra = { discordInvite: supportSettings.discordInvite };
+      throw err;
+    }
 
     let body = {};
     let raw = null;

@@ -113,7 +113,7 @@ function signer() {
 
 async function start(opts = {}) {
   const clock = { t: Date.parse("2026-10-19T00:00:00Z") };
-  const server = createApp({ now: () => clock.t, loginLimit: 500, powDifficulty: 0, ...opts });
+  const server = createApp({ supportTicketsEnabled: true, now: () => clock.t, loginLimit: 500, powDifficulty: 0, ...opts });
   await server.ready;
   await server.commandsRegistered;
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -170,6 +170,41 @@ async function command(ctx, sig, payload) {
 const staffCmd = (channelId, name, options = [], { roles = [SUPPORT_ROLE], userId = "staff-1", nick = ".gg/shenji" } = {}) => ({
   type: 2, channel_id: channelId, data: { name, options },
   member: { nick, roles, user: { id: userId, username: "shenji", global_name: ".gg/shenji" } },
+});
+
+test("paused website support directs users to Discord and preserves ticket history", async () => {
+  await withServer({ supportTicketsEnabled: false, blobs: memoryBlobs() }, async (ctx) => {
+    const alice = await ctx.human("alice");
+    const account = ctx.server.store.authenticate(alice.token);
+    const ticket = ctx.server.store.createTicket(account, { subject: "Existing help", message: "Keep this history" });
+    const info = (await ctx.call("GET", "/v1/support")).json;
+    assert.equal(info.ticketsEnabled, false);
+    assert.equal(info.liveReplies, false);
+    assert.equal(info.discordInvite, "https://discord.gg/eVYyxbyy22");
+    for (const endpoint of ["/v1/tickets", `/v1/tickets/${ticket.id}/messages`, `/v1/tickets/${ticket.id}/close`, "/v1/uploads"]) {
+      const result = await ctx.call("POST", endpoint, { key: alice.token, body: { subject: "New help", message: "Do not create this", text: "Do not append" } });
+      assert.equal(result.status, 503);
+      assert.equal(result.json.error.code, "support_paused");
+      assert.equal(result.json.error.discordInvite, info.discordInvite);
+    }
+    const saved = (await ctx.call("GET", `/v1/tickets/${ticket.id}`, { key: alice.token })).json;
+    assert.equal(saved.status, "open");
+    assert.equal(saved.messages.length, ticket.messages.length);
+    assert.equal((await ctx.call("GET", "/v1/tickets", { key: alice.token })).json.tickets.length, 1);
+    assert.equal((await ctx.call("GET", `/v1/tickets/${ticket.id}`)).status, 401);
+    for (const endpoint of ["/support", "/support/", "/tickets", "/tickets/old-ticket"]) {
+      const res = await fetch(ctx.base + endpoint, { redirect: "manual" });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get("location"), info.discordInvite);
+      assert.equal(res.headers.get("cache-control"), "no-store");
+    }
+  });
+});
+
+test("website tickets are paused by default", async () => {
+  await withServer({ supportTicketsEnabled: undefined }, async (ctx) => {
+    assert.equal((await ctx.call("GET", "/v1/support")).json.ticketsEnabled, false);
+  });
 });
 
 test("a ticket with images creates a channel, uploads the pictures, and keeps them private", async () => {

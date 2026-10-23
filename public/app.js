@@ -1972,9 +1972,9 @@
         }
         case "disputed":
           put(p, el("h3", {}, "This deal is in dispute"),
-            el("p", {}, "The deposit stays in Valence's wallet while we look at it. Add anything useful in a support ticket and we'll come back to you."),
+            el("p", {}, "The deposit stays in Valence's wallet while we look at it. Join our Discord server to contact the team about this dispute."),
             deal.dispute && deal.dispute.reason ? el("blockquote", { class: "note" }, deal.dispute.reason) : null,
-            el("div", { class: "actions" }, btnLink("#support", "Open a support ticket", "secondary")));
+            el("div", { class: "actions" }, btnLink("/support", "Get support on Discord", "secondary")));
           break;
         default:
           put(p, el("h3", {}, "Cancelled"), el("p", {}, "This deal was cancelled before anyone paid anything."));
@@ -1986,7 +1986,7 @@
       const q = deal.quote;
       const pay = deal.payment;
       const p = el("section", { class: "next" });
-      const supportLink = el("p", { class: "dim" }, "Something wrong? ", el("a", { href: "#support" }, "Open a support ticket"), ".");
+      const supportLink = el("p", { class: "dim" }, "Something wrong? ", el("a", { href: "/support" }, "Get support on Discord"), ".");
       const disputeButton = () => el("button", { type: "button", class: "btn ghost small", onclick: async () => {
         const reason = prompt("What's gone wrong? This freezes the deal and sends it to Valence support.");
         if (reason === null) return;
@@ -2126,9 +2126,9 @@
           put(p, el("h3", {}, chargeback ? "The buyer's bank has reversed this payment" : "This deal is in dispute"),
             el("p", {}, chargeback
               ? "The buyer raised this with their bank rather than with us. Stripe handles it from here and will ask for evidence."
-              : "The money stays held while we look at it. Add anything useful in a support ticket and we'll come back to you."),
+              : "The money stays held while we look at it. Join our Discord server to contact the team about this dispute."),
             deal.dispute && deal.dispute.reason ? el("blockquote", { class: "note" }, deal.dispute.reason) : null,
-            el("div", { class: "actions" }, btnLink("#support", "Open a support ticket", "secondary")));
+            el("div", { class: "actions" }, btnLink("/support", "Get support on Discord", "secondary")));
           break;
         }
 
@@ -2412,8 +2412,21 @@
   }
 
   // ---------- support ----------  // ---------- support ----------
+  function pausedSupport(view, info) {
+    put(view, el("section", { class: "card" },
+      el("h2", {}, "Support is on Discord"),
+      el("p", { class: "muted" }, "Website tickets are temporarily paused. Join our Discord server to get help from the Valence team."),
+      el("div", { class: "actions" }, el("a", {
+        class: "btn", href: info.discordInvite || DISCORD_INVITE, target: "_blank", rel: "noopener noreferrer",
+      }, icon("discord"), "Join Discord for support", icon("out"))),
+      el("p", { class: "hint" }, "Existing tickets are saved. Please contact the team on Discord for updates.")));
+  }
+
   async function viewSupport(view, _arg, gen) {
-    const [info, list, dealsRes] = await Promise.all([api("GET", "/support"), api("GET", "/tickets"), api("GET", "/deals")]);
+    const info = await api("GET", "/support");
+    if (!alive(gen)) return;
+    if (info.ticketsEnabled === false) return pausedSupport(view, info);
+    const [list, dealsRes] = await Promise.all([api("GET", "/tickets"), api("GET", "/deals")]);
     if (!alive(gen)) return;
     const discordCard = el("div", { class: "discord-card" },
       el("span", { class: "page-ico" }, icon("support")),
@@ -2475,7 +2488,10 @@
   }
 
   async function viewTicket(view, id, gen) {
-    let [t, info] = await Promise.all([api("GET", "/tickets/" + encodeURIComponent(id)), api("GET", "/support")]);
+    const info = await api("GET", "/support");
+    if (!alive(gen)) return;
+    if (info.ticketsEnabled === false) return pausedSupport(view, info);
+    let t = await api("GET", "/tickets/" + encodeURIComponent(id));
     if (!alive(gen)) return;
     $("#page-title").textContent = `Ticket #${t.number}`;
     const head = el("div");
@@ -2582,11 +2598,11 @@
     ["What if the other side never delivers?", "The seller can refund you at any time. If they don't, you can cancel once the deal's refund deadline has passed, and the hold on your card is released: nothing was ever charged."],
     ["How are disputes handled?", "Either side can open a dispute, which freezes the deal. Valence reads both sides and decides to release, refund or split. The money stays held throughout."],
     ["What does it cost?", "Valence takes 1%, paid by the buyer on top of the deal amount, and returns it in full if the deal is cancelled or refunded. Stripe's card processing fee is paid by the seller, as it would be for any merchant. Every number is shown before anyone pays."],
-    ["Do I need to refresh to see updates?", "No. Deal pages and support tickets update by themselves every few seconds."],
+    ["Do I need to refresh to see updates?", "No. Deal pages update by themselves every few seconds. Website tickets are temporarily paused; support is available on Discord."],
   ];
   function viewFaq(view) {
     put(view, el("section", { class: "card" }, el("div", { class: "faq" }, FAQ.map(([q, a]) => el("details", {}, el("summary", {}, q), el("p", {}, a))))),
-      el("p", { class: "muted" }, "Still stuck? ", el("a", { href: "#support" }, "Open a support ticket"), " or ", el("a", { href: DISCORD_INVITE, target: "_blank", rel: "noopener" }, "ask on Discord"), "."));
+      el("p", { class: "muted" }, "Still stuck? ", el("a", { href: "/support" }, "Join Discord for support"), "."));
   }
 
   // ---------- settings ----------
